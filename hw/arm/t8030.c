@@ -2574,7 +2574,7 @@ static void t8030_init(MachineState* machine)
     apple_dt_set_prop_u64(child, "unique-chip-id", t8030->ecid);
 
     // Update the display parameters
-    apple_dt_set_prop_u32(child, "display-scale", 2);
+    apple_dt_set_prop_u32(child, "display-scale", t8030->disp_scale);
 
     child = apple_dt_get_node(t8030->device_tree, "product");
     apple_dt_set_prop_u64(child, "display-corner-radius", 0x100000027);
@@ -2732,6 +2732,7 @@ PROP_STR_GETTER_SETTER(mlb_serial_number);
 PROP_STR_GETTER_SETTER(regulatory_model);
 PROP_VISIT_GETTER_SETTER(uint32, disp_width);
 PROP_VISIT_GETTER_SETTER(uint32, disp_height);
+PROP_VISIT_GETTER_SETTER(uint32, disp_scale);
 PROP_GETTER_SETTER(bool, enable_pac);
 
 static void t8030_class_init(ObjectClass* klass, const void* data)
@@ -2802,6 +2803,15 @@ static void t8030_class_init(ObjectClass* klass, const void* data)
     oprop = object_class_property_add(klass, "disp-height", "uint32", t8030_get_disp_height, t8030_set_disp_height,
                                       NULL, NULL);
     object_property_set_default_uint(oprop, 1792);
+    /*
+     * Pixels per point. The panel is 828x1792 at two, which is what an iPhone
+     * 11 is; halving the framebuffer and dropping this to one keeps the same
+     * interface, laid out over a quarter of the pixels.
+     */
+    oprop = object_class_property_add(klass, "disp-scale", "uint32", t8030_get_disp_scale, t8030_set_disp_scale,
+                                      NULL, NULL);
+    object_property_set_default_uint(oprop, 2);
+    object_class_property_set_description(klass, "disp-scale", "Display Scale");
     object_class_property_add_bool(klass, "enable-pac", t8030_get_enable_pac, t8030_set_enable_pac);
     object_class_property_set_description(klass, "enable-pac",
                                           "Enable PAC with virtualisation (supports arm64e binaries only).");

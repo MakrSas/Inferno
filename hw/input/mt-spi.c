@@ -146,9 +146,25 @@ struct AppleMTSPIState
 #define MT_ROWS                  (31)
 #define MT_COLUMNS               (15)
 #define MT_BCD_VER               (bswap16(0x292))
-#define MT_SENSOR_SURFACE_WIDTH  (6458)     // display_width/828 * 7.8
-#define MT_SENSOR_SURFACE_HEIGHT (13977)    // display_height/1792 * 7.8
-#define MT_SENSOR_EDGE           (400)      // 4.00 mm
+/*
+ * The sensor is 7.8 units per display pixel: 828x1792 gives 6458x13977, the
+ * numbers this was originally written with. Derived rather than written down
+ * because the machine's display size is a parameter now, and a panel reporting
+ * a surface that does not match its screen puts every touch in the wrong place.
+ */
+#define MT_SENSOR_UNITS_PER_PIXEL_NUM (78)
+#define MT_SENSOR_UNITS_PER_PIXEL_DEN (10)
+#define MT_SENSOR_EDGE                (400) // 4.00 mm
+
+static inline int32_t apple_mt_spi_surface_width(const AppleMTSPIState* s)
+{
+    return (int32_t)s->display_width * MT_SENSOR_UNITS_PER_PIXEL_NUM / MT_SENSOR_UNITS_PER_PIXEL_DEN;
+}
+
+static inline int32_t apple_mt_spi_surface_height(const AppleMTSPIState* s)
+{
+    return (int32_t)s->display_height * MT_SENSOR_UNITS_PER_PIXEL_NUM / MT_SENSOR_UNITS_PER_PIXEL_DEN;
+}
 
 #define PATH_STAGE_NOT_TRACKING    (0)
 #define PATH_STAGE_START_IN_RANGE  (1)
@@ -465,14 +481,14 @@ static void apple_mt_spi_handle_get_feature(AppleMTSPIState* s)
             apple_mt_spi_buf_ensure_capacity(&packet->buf, 9 + 16 + 2);
             apple_mt_spi_push_report_hdr(&packet->buf, HID_CONTROL_PACKET_SET_OUTPUT_REPORT, report_id,
                                          HID_PACKET_STATUS_SUCCESS, frame_number, 16);
-            apple_mt_spi_buf_push_dword(&packet->buf, MT_SENSOR_SURFACE_WIDTH);
-            apple_mt_spi_buf_push_dword(&packet->buf, MT_SENSOR_SURFACE_HEIGHT);
+            apple_mt_spi_buf_push_dword(&packet->buf, apple_mt_spi_surface_width(s));
+            apple_mt_spi_buf_push_dword(&packet->buf, apple_mt_spi_surface_height(s));
             // these values might need to be different, especially considering the
             // values/stuff inside HID_REPORT_SENSOR_REGION_DESC.
             apple_mt_spi_buf_push_word(&packet->buf, 0);
             apple_mt_spi_buf_push_word(&packet->buf, 0);
-            apple_mt_spi_buf_push_word(&packet->buf, MT_SENSOR_SURFACE_WIDTH);
-            apple_mt_spi_buf_push_word(&packet->buf, MT_SENSOR_SURFACE_HEIGHT);
+            apple_mt_spi_buf_push_word(&packet->buf, apple_mt_spi_surface_width(s));
+            apple_mt_spi_buf_push_word(&packet->buf, apple_mt_spi_surface_height(s));
             break;
         case HID_REPORT_SENSOR_REGION_PARAM:
             apple_mt_spi_buf_ensure_capacity(&packet->buf, 9 + 6 + 2);
@@ -646,10 +662,10 @@ static uint32_t apple_mt_spi_transfer(SSIPeripheral* dev, uint32_t val)
     return ret;
 }
 
-static bool apple_mt_spi_contact_is_from_edge(int16_t x, int16_t y)
+static bool apple_mt_spi_contact_is_from_edge(AppleMTSPIState* s, int16_t x, int16_t y)
 {
-    return x < MT_SENSOR_EDGE || x >= MT_SENSOR_SURFACE_WIDTH - MT_SENSOR_EDGE || y < MT_SENSOR_EDGE
-           || y >= MT_SENSOR_SURFACE_HEIGHT - MT_SENSOR_EDGE;
+    return x < MT_SENSOR_EDGE || x >= apple_mt_spi_surface_width(s) - MT_SENSOR_EDGE || y < MT_SENSOR_EDGE
+           || y >= apple_mt_spi_surface_height(s) - MT_SENSOR_EDGE;
 }
 
 /* MultitouchSupport alg_ComputeContactDensityFromRadii, with maximum_radii/minimum_radii == 0 */
@@ -826,22 +842,22 @@ static void apple_mt_spi_mouse_event(void* opaque, int dx, int dy, int dz, int b
 
     QEMU_LOCK_GUARD(&s->lock);
 
-    x = qemu_input_scale_axis(dx, INPUT_EVENT_ABS_MIN, INPUT_EVENT_ABS_MAX, 0, MT_SENSOR_SURFACE_WIDTH);
+    x = qemu_input_scale_axis(dx, INPUT_EVENT_ABS_MIN, INPUT_EVENT_ABS_MAX, 0, apple_mt_spi_surface_width(s));
     y = qemu_input_scale_axis(INPUT_EVENT_ABS_MAX - dy, INPUT_EVENT_ABS_MIN, INPUT_EVENT_ABS_MAX, 0,
-                              MT_SENSOR_SURFACE_HEIGHT);
+                              apple_mt_spi_surface_height(s));
 
     // Hardcoded calibration on y-axis.
     // Tested accuracy for display_height 1792 is +/- 1 pixel.
     // it might not be perfect, also there might be some calibration needed for
     // "x".
-    y -= qemu_input_scale_axis(16, 0, s->display_height, 0, MT_SENSOR_SURFACE_HEIGHT);
+    y -= qemu_input_scale_axis(16, 0, s->display_height, 0, apple_mt_spi_surface_height(s));
     y  = MAX(y, 0);
 
     s->prev_btn_state = s->btn_state;
     s->btn_state      = buttons_state;
 
     if ((s->prev_btn_state & MOUSE_EVENT_LBUTTON) == 0 && (s->btn_state & MOUSE_EVENT_LBUTTON) != 0) {
-        s->path_flags = apple_mt_spi_contact_is_from_edge(x, y) ? PATH_FLAGS_EDGE : 0;
+        s->path_flags = apple_mt_spi_contact_is_from_edge(s, x, y) ? PATH_FLAGS_EDGE : 0;
         apple_mt_spi_schedule_touch_update(s, PATH_STAGE_MAKE_TOUCH, x, y);
 
         timer_del(s->end_timer);

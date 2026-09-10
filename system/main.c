@@ -36,7 +36,7 @@
     #include <SDL.h>
 #endif
 
-#ifdef CONFIG_DARWIN
+#if defined(CONFIG_DARWIN) && !defined(CONFIG_IOS)
     #include <CoreFoundation/CoreFoundation.h>
 #endif
 
@@ -54,13 +54,27 @@ static void* qemu_default_main(void* opaque)
 
 int (*qemu_main)(void);
 
-#ifdef CONFIG_DARWIN
+/*
+ * On macOS the UI needs the main thread, so QEMU hands it to CFRunLoop and runs
+ * its own loop on a worker. On iOS the embedding app owns the run loop and
+ * calls qemu_init()/qemu_main_loop() itself, so this must stay unset.
+ */
+#if defined(CONFIG_DARWIN) && !defined(CONFIG_IOS)
 static int os_darwin_cfrunloop_main(void)
 {
     CFRunLoopRun();
     assert_not_reached();
 }
 int (*qemu_main)(void) = os_darwin_cfrunloop_main;
+#endif
+
+#ifdef __ANDROID__
+/*
+ * Bionic's loader requires the main executable's PT_TLS segment to be aligned
+ * to at least 64 bytes on arm64, and aborts at startup otherwise. QEMU's own
+ * thread-locals only ask for 8, so pin the alignment here.
+ */
+static __thread char android_tls_align_pad __attribute__((aligned(64), used));
 #endif
 
 int main(int argc, char** argv)

@@ -25,6 +25,7 @@
 #include "hw/qdev-properties.h"
 #include "hw/registerfields.h"
 #include "qemu/cutils.h"
+#include "qemu/datadir.h"
 #include "qemu/log.h"
 #include "system/dma.h"
 #include "ui/console.h"
@@ -658,7 +659,17 @@ static void adp_v4_read_and_draw_boot_splash(AppleDisplayPipeV4State* adp)
     assert_nonnull(path);
     fp = fopen(path, "rb");
     if (fp == NULL) {
-        error_setg(&error_abort, "Missing emulator branding: %s.", path);
+        /*
+         * The relocated path is derived from the executable's location, which
+         * points outside an app bundle where nothing can be installed. Fall
+         * back to the data directories, so -L can supply the file.
+         */
+        g_free(path);
+        path = qemu_find_file(QEMU_FILE_TYPE_ICON, "CKQEMUBootSplash@2x.png");
+        if (path != NULL) { fp = fopen(path, "rb"); }
+    }
+    if (fp == NULL) {
+        error_setg(&error_abort, "Missing emulator branding.");
         return;
     }
     fread(sig, sizeof(sig), 1, fp);

@@ -83,6 +83,8 @@ typedef struct
     char*                mlb_serial_number;
     char*                regulatory_model;
     uint32_t             disp_width;
+    /* Points to pixels. iOS lays its interface out from this, not from size. */
+    uint32_t             disp_scale;
     uint32_t             disp_height;
     bool                 enable_pac;
 } AppleT8030MachineState;

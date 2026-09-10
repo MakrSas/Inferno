@@ -44,7 +44,10 @@
 #include "qemu/thread-context.h"
 #include "qemu/main-loop.h"
 
-#ifdef CONFIG_LINUX
+#if defined(CONFIG_LINUX) || defined(__linux__)
+    /* Android is Linux, but meson reports host_os == 'android', so
+     * CONFIG_LINUX stays unset while SYS_gettid/__NR_tgkill are still
+     * what the code below expects. */
     #include <sys/syscall.h>
 #endif
 
@@ -918,18 +921,34 @@ int qemu_shm_alloc(size_t size, Error** errp)
      */
     g_string_printf(shm_name, "/qemu-" FMT_pid "-shm-%d", getpid(), cur_sequence);
 
+#ifdef __ANDROID__
+    /*
+     * bionic provides no POSIX shared memory objects. memfd is the Android
+     * equivalent and is supported by every kernel this can run on.
+     */
+    (void)oflag;
+    (void)mode;
+    fd = syscall(SYS_memfd_create, shm_name->str, 0);
+    if (fd < 0) {
+        error_setg_errno(errp, errno, "failed to create memfd shared memory");
+        return -1;
+    }
+#else
     fd = shm_open(shm_name->str, oflag, mode);
     if (fd < 0) {
         error_setg_errno(errp, errno, "failed to create POSIX shared memory");
         return -1;
     }
+#endif
 
     /*
      * We have the file descriptor, so we no longer need to expose the
      * POSIX shared memory object. However it will remain allocated as long as
      * there are file descriptors pointing to it.
      */
+#ifndef __ANDROID__
     shm_unlink(shm_name->str);
+#endif
 
     if (ftruncate(fd, size) == -1) {
         error_setg_errno(errp, errno, "failed to resize POSIX shared memory to %zu", size);

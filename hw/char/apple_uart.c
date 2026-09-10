@@ -153,6 +153,11 @@ struct AppleUartState
     QEMUTimer* fifo_timeout_timer;
     uint64_t   wordtime; /* word time in ns */
 
+    /* Coalesced transmit. See apple_uart_tx_push(). */
+    uint8_t    txbuf[16384];
+    uint32_t   txlen;
+    QEMUTimer* tx_flush_timer;
+
     CharBackend chr;
     qemu_irq    irq;
     qemu_irq    dmairq;
@@ -160,6 +165,76 @@ struct AppleUartState
     uint32_t channel;
     uint32_t last_irq;
 };
+
+/* How long a character may wait for company before it is sent on alone. */
+#define TX_COALESCE_NS (1 * 1000 * 1000)
+
+/*
+ * Hands over what has piled up, and never waits to do it.
+ *
+ * This runs from a timer, which is to say from the main loop — and the main
+ * loop is what draws the guest's screen. `qemu_chr_fe_write_all` waits for a
+ * reader that may have stopped reading, and when it did the picture died with
+ * it a couple of minutes after the socket filled. So the write is the
+ * non-blocking one, and whatever will not go now goes on the next flush.
+ *
+ * Nothing is lost by that: the chardev logs only the bytes the backend actually
+ * took, and logs the rest when they are offered again.
+ */
+static void apple_uart_tx_flush(AppleUartState* s)
+{
+    int sent;
+
+    if (s->txlen == 0) { return; }
+
+    sent = qemu_chr_fe_write(&s->chr, s->txbuf, s->txlen);
+    if (sent < 0) { sent = 0; }
+
+    if ((uint32_t)sent < s->txlen) {
+        s->txlen -= (uint32_t)sent;
+        memmove(s->txbuf, s->txbuf + sent, s->txlen);
+        timer_mod(s->tx_flush_timer, qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + TX_COALESCE_NS);
+    }
+    else {
+        s->txlen = 0;
+    }
+}
+
+static void apple_uart_tx_flush_timer(void* opaque) { apple_uart_tx_flush((AppleUartState*)opaque); }
+
+/*
+ * Takes one character from the guest.
+ *
+ * The guest writes a character per store to UTXH, and each one used to become a
+ * write() to the chardev at once. With a socket and a log file behind it that is
+ * two system calls per character, made from the vCPU thread with the big lock
+ * held, so printing a screenful cost tens of thousands of them and the machine
+ * stopped dead for every one. Characters are gathered here instead and handed
+ * over in one piece: when the buffer fills, or a millisecond after the guest
+ * stops talking, whichever comes first. The timer is armed once per burst
+ * rather than per character — arming it is itself work.
+ */
+static void apple_uart_tx_push(AppleUartState* s, uint8_t ch)
+{
+    if (s->txlen == sizeof(s->txbuf)) {
+        apple_uart_tx_flush(s);
+        if (s->txlen == sizeof(s->txbuf)) {
+            /*
+             * Sixteen kilobytes deep and the far end has taken none of it. It
+             * is not coming back for the old bytes, and the guest must not be
+             * stopped waiting for it, so the oldest character goes.
+             */
+            s->txlen--;
+            memmove(s->txbuf, s->txbuf + 1, s->txlen);
+        }
+    }
+
+    s->txbuf[s->txlen++] = ch;
+
+    if (!timer_pending(s->tx_flush_timer)) {
+        timer_mod(s->tx_flush_timer, qemu_clock_get_ns(QEMU_CLOCK_REALTIME) + TX_COALESCE_NS);
+    }
+}
 
 /* Used only for tracing */
 static const char* apple_uart_regname(hwaddr offset)
@@ -350,9 +425,7 @@ static void apple_uart_write(void* opaque, hwaddr offset, uint64_t val, unsigned
             if (qemu_chr_fe_backend_connected(&s->chr)) {
                 s->reg[I_(UTRSTAT)] &= ~(UTRSTAT_Tx_EMPTY | UTRSTAT_Tx_BUFFER_EMPTY);
                 ch                   = (uint8_t)val;
-                /* XXX this blocks entire thread. Rewrite to use
-                 * qemu_chr_fe_write and background I/O callbacks */
-                qemu_chr_fe_write_all(&s->chr, &ch, 1);
+                apple_uart_tx_push(s, ch);
                 trace_apple_uart_tx(s->channel, ch);
                 s->reg[I_(UTRSTAT)] |= UTRSTAT_Tx_EMPTY | UTRSTAT_Tx_BUFFER_EMPTY;
                 apple_uart_update_irq(s);
@@ -544,6 +617,8 @@ static void apple_uart_realize(DeviceState* dev, Error** errp)
     fifo8_create(&s->tx, s->tx_fifo_size);
 
     s->fifo_timeout_timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, apple_uart_timeout_int, s);
+    /* Real time, not guest time: what is being spared is the host's syscalls. */
+    s->tx_flush_timer = timer_new_ns(QEMU_CLOCK_REALTIME, apple_uart_tx_flush_timer, s);
 
     qemu_chr_fe_set_handlers(&s->chr, apple_uart_can_receive, apple_uart_receive, apple_uart_event, NULL, s, NULL,
                              true);

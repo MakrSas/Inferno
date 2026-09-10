@@ -3,6 +3,7 @@
 typedef enum
 {
     QEMU_FILE_TYPE_KEYMAP,
+    QEMU_FILE_TYPE_ICON,
 } QemuFileType;
 
 /**

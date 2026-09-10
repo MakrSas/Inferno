@@ -17,6 +17,12 @@ ss = import('sourceset')
 fs = import('fs')
 
 host_os = host_machine.system()
+if host_os == 'android'
+  # Android is Linux. Meson reports it as its own system, which would leave
+  # CONFIG_LINUX unset while the C code still guards Linux-only helpers with
+  # plain __linux__, so the two disagree and the build breaks.
+  host_os = 'linux'
+endif
 
 # Temporary directory used for files created while
 # configure runs. Since it is in the build directory
@@ -339,6 +345,12 @@ elif host_os == 'emscripten'
   supported_backends += ['wasm']
 else
   if host_os != 'darwin' and cc.links(ucontext_probe)
+    supported_backends += ['ucontext']
+  elif host_os == 'darwin' and cc.has_header('libucontext/libucontext.h')
+    # Darwin's own makecontext is unavailable on iOS, but libucontext supplies
+    # the same primitives. This matters there: the sigaltstack fallback builds
+    # coroutines out of SIGUSR2, which a debugger swallows — and on iOS the JIT
+    # is only enabled by a debugger.
     supported_backends += ['ucontext']
   endif
   supported_backends += ['sigaltstack']
@@ -1288,12 +1300,17 @@ if host_os == 'darwin'
   else
     brew_inc_dirs = include_directories('/usr/local/include/', is_system: true)
   endif
-  raw_liblzfse = cc.find_library('lzfse',
-    dirs: ['/opt/homebrew/lib/', '/usr/local/lib/'],
-    header_include_directories: brew_inc_dirs,
-    has_headers: ['lzfse.h'],
-    required: true
-  )
+  # Try the compiler's own search path first: a cross build (iOS) has lzfse in
+  # its own sysroot/prefix, and the Homebrew copy is the wrong architecture.
+  raw_liblzfse = cc.find_library('lzfse', has_headers: ['lzfse.h'], required: false)
+  if not raw_liblzfse.found()
+    raw_liblzfse = cc.find_library('lzfse',
+      dirs: ['/opt/homebrew/lib/', '/usr/local/lib/'],
+      header_include_directories: brew_inc_dirs,
+      has_headers: ['lzfse.h'],
+      required: true
+    )
+  endif
   liblzfse = declare_dependency(
     dependencies: raw_liblzfse,
     include_directories: brew_inc_dirs
@@ -1691,6 +1708,9 @@ config_host_data.set('CONFIG_BSD', host_os in bsd_oses)
 config_host_data.set('CONFIG_FREEBSD', host_os == 'freebsd')
 config_host_data.set('CONFIG_COCOA', cocoa.found())
 config_host_data.set('CONFIG_DARWIN', host_os == 'darwin')
+# iOS is Darwin but lacks a few macOS-only APIs (W^X toggling for MAP_JIT,
+# fork/exec), so it needs to be distinguishable from macOS.
+config_host_data.set('CONFIG_IOS', host_os == 'darwin' and host_machine.subsystem() == 'ios')
 config_host_data.set('CONFIG_GCOV', get_option('b_coverage'))
 config_host_data.set('CONFIG_LIBUDEV', libudev.found())
 config_host_data.set('CONFIG_LINUX', host_os == 'linux')
@@ -1767,6 +1787,7 @@ config_host_data.set('QEMU_VERSION_MAJOR', meson.project_version().split('QEMU-'
 config_host_data.set('QEMU_VERSION_MINOR', meson.project_version().split('QEMU-')[1].split('_')[0].split('.')[1])
 config_host_data.set('QEMU_VERSION_MICRO', meson.project_version().split('QEMU-')[1].split('_')[0].split('.')[2])
 
+config_host_data.set('CONFIG_SHARED_LIBRARY_BUILD', get_option('shared_lib'))
 config_host_data.set_quoted('CONFIG_HOST_DSOSUF', host_dsosuf)
 config_host_data.set('HAVE_HOST_BLOCK_DEVICE', have_host_block_device)
 
@@ -1811,7 +1832,10 @@ if host_os == 'windows'
 endif
 
 # has_function
-config_host_data.set('CONFIG_CLOSE_RANGE', cc.has_function('close_range'))
+# bionic ships the symbol but hides the prototype below API 34, so the
+# declaration has to be part of the check.
+config_host_data.set('CONFIG_CLOSE_RANGE',
+                     cc.has_function('close_range', prefix: '#include <unistd.h>'))
 config_host_data.set('CONFIG_ACCEPT4', cc.has_function('accept4'))
 config_host_data.set('CONFIG_CLOCK_ADJTIME', cc.has_function('clock_adjtime'))
 config_host_data.set('CONFIG_DUP3', cc.has_function('dup3'))
@@ -3081,13 +3105,34 @@ foreach target : target_dirs
     lib_deps += dep.partial_dependency(compile_args: true, includes: true)
   endforeach
 
-  lib = static_library('qemu-' + target,
+  if get_option('shared_lib')
+    # Embedders (iOS, where a process cannot exec) dlopen this and call
+    # qemu_init/qemu_main_loop/qemu_cleanup directly, so the symbols have to
+    # stay visible and the emulator links against the library instead of
+    # absorbing its objects.
+    build_lib_args = {
+      'target_type': 'shared_library',
+      'install': true,
+      'dependencies': arch_deps,
+      'link_depends': [block_syms, qemu_syms],
+      'link_args': link_args,
+      'gnu_symbol_visibility': 'default',
+    }
+  else
+    build_lib_args = {
+      'target_type': 'static_library',
+      'install': false,
+      'dependencies': lib_deps,
+    }
+  endif
+
+  lib = build_target('qemu-' + target,
                  sources: arch_srcs + genh,
-                 dependencies: lib_deps,
                  objects: objects,
                  include_directories: target_inc,
                  c_args: c_args,
-                 build_by_default: false)
+                 build_by_default: false,
+                 kwargs: build_lib_args)
 
   if target.endswith('-softmmu')
     execs = [{
@@ -3118,11 +3163,19 @@ foreach target : target_dirs
       exe_name += '-unsigned'
     endif
 
+    if get_option('shared_lib')
+      exe_deps = [declare_dependency(link_with: lib)]
+      exe_objs = []
+    else
+      exe_deps = arch_deps
+      exe_objs = lib.extract_all_objects(recursive: true)
+    endif
+
     emulator = executable(exe_name, exe['sources'],
                install: true,
                c_args: c_args,
-               dependencies: arch_deps + exe['dependencies'],
-               objects: lib.extract_all_objects(recursive: true),
+               dependencies: exe_deps + exe['dependencies'],
+               objects: exe_objs,
                link_depends: [block_syms, qemu_syms],
                link_args: link_args,
                win_subsystem: exe['win_subsystem'])

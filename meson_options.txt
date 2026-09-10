@@ -43,6 +43,9 @@ option('whpx', type: 'feature', value: 'auto',
        description: 'WHPX acceleration support')
 option('hvf', type: 'feature', value: 'auto',
        description: 'HVF acceleration support')
+option('shared_lib', type: 'boolean', value: false,
+       description: 'Build the emulator as a shared library (for embedding, e.g. iOS)')
+
 option('tcg', type: 'feature', value: 'enabled',
        description: 'TCG support')
 option('debug_tcg', type: 'boolean', value: false,

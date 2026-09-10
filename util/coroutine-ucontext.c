@@ -23,7 +23,21 @@
 #define _FORTIFY_SOURCE 0
 
 #include "qemu/osdep.h"
-#include <ucontext.h>
+#ifdef CONFIG_IOS
+    /*
+     * iOS marks makecontext/swapcontext unavailable, and the sigaltstack
+     * backend cannot be used either: it creates coroutines by raising SIGUSR2,
+     * which an attached debugger intercepts, and JIT on iOS requires a
+     * debugger. libucontext provides the same primitives in plain assembly.
+     */
+    #include <libucontext/libucontext.h>
+    #define ucontext_t  libucontext_ucontext_t
+    #define getcontext  libucontext_getcontext
+    #define makecontext libucontext_makecontext
+    #define swapcontext libucontext_swapcontext
+#else
+    #include <ucontext.h>
+#endif
 #include "qemu/coroutine_int.h"
 #include "qemu/coroutine-tls.h"
 

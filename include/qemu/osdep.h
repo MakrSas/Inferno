@@ -813,10 +813,18 @@ extern "C"
  * Toggle write/execute on the pages marked MAP_JIT
  * for the current thread.
  */
-#ifdef __APPLE__
+#if defined(__APPLE__) && !defined(CONFIG_IOS)
     static inline void qemu_thread_jit_execute(void) { pthread_jit_write_protect_np(true); }
 
     static inline void qemu_thread_jit_write(void) { pthread_jit_write_protect_np(false); }
+#elif defined(CONFIG_IOS)
+/*
+ * iOS has no pthread_jit_write_protect_np(): MAP_JIT pages there are plain RWX
+ * once the process carries the JIT entitlement (or runs under a debugger), so
+ * there is no W^X state to toggle.
+ */
+static inline void qemu_thread_jit_write(void) { }
+static inline void qemu_thread_jit_execute(void) { }
 #else
 static inline void qemu_thread_jit_write(void) { }
 static inline void qemu_thread_jit_execute(void) { }

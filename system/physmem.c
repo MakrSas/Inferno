@@ -139,13 +139,32 @@ struct AddressSpaceDispatch
 };
 
 #define SUBPAGE_IDX(addr) ((addr) & ~TARGET_PAGE_MASK)
+
+/*
+ * sub_section maps an offset within the page to a section number. One entry
+ * per byte costs TARGET_PAGE_SIZE * 2 bytes, which with 16 KiB pages is 32 KiB
+ * for every subpage. Apple machines create thousands of subpages in each vCPU
+ * address space: hundreds of megabytes spent on nothing.
+ *
+ * So an entry covers 2^shift bytes rather than one. The grid starts coarse and
+ * is refined only when a region does not fit the current step; refinement is
+ * exact, every old entry simply splits.
+ */
+#define SUBPAGE_SHIFT_MAX 8
+
 typedef struct subpage_t
 {
     MemoryRegion iomem;
     FlatView*    fv;
     hwaddr       base;
-    uint16_t     sub_section[];
+    unsigned     shift;
+    uint16_t*    sub_section;
 } subpage_t;
+
+static inline uint16_t subpage_section_at(const subpage_t* mmio, hwaddr addr)
+{
+    return mmio->sub_section[SUBPAGE_IDX(addr) >> mmio->shift];
+}
 
 #define PHYS_SECTION_UNASSIGNED 0
 
@@ -324,7 +343,7 @@ static MemoryRegionSection* address_space_lookup_region(AddressSpaceDispatch* d,
     }
     if (resolve_subpage && section->mr->subpage) {
         subpage = container_of(section->mr, subpage_t, iomem);
-        section = &d->map.sections[subpage->sub_section[SUBPAGE_IDX(addr)]];
+        section = &d->map.sections[subpage_section_at(subpage, addr)];
     }
     return section;
 }
@@ -904,6 +923,7 @@ static void phys_section_destroy(MemoryRegion* mr)
     if (have_sub_page) {
         subpage_t* subpage = container_of(mr, subpage_t, iomem);
         object_unref(OBJECT(&subpage->iomem));
+        g_free(subpage->sub_section);
         g_free(subpage);
     }
 }
@@ -2073,13 +2093,34 @@ static const MemoryRegionOps subpage_ops = {
     .endianness            = DEVICE_NATIVE_ENDIAN,
 };
 
+/* Refine the grid down to shift, splitting every existing entry. */
+static void subpage_refine(subpage_t* mmio, unsigned shift)
+{
+    unsigned  old_shift = mmio->shift;
+    unsigned  entries   = TARGET_PAGE_SIZE >> shift;
+    unsigned  split     = 1u << (old_shift - shift);
+    uint16_t* fine      = g_new0(uint16_t, entries);
+    unsigned  i;
+
+    for (i = 0; i < entries; i++) { fine[i] = mmio->sub_section[i / split]; }
+
+    g_free(mmio->sub_section);
+    mmio->sub_section = fine;
+    mmio->shift       = shift;
+}
+
 static int subpage_register(subpage_t* mmio, uint32_t start, uint32_t end, uint16_t section)
 {
-    int idx, eidx;
+    unsigned idx, eidx, need;
 
     if (start >= TARGET_PAGE_SIZE || end >= TARGET_PAGE_SIZE) { return -1; }
-    idx  = SUBPAGE_IDX(start);
-    eidx = SUBPAGE_IDX(end);
+
+    /* The coarsest step whose boundaries both edges of the region fall on. */
+    need = ctz32(start | (end + 1));
+    if (need < mmio->shift) { subpage_refine(mmio, need); }
+
+    idx  = SUBPAGE_IDX(start) >> mmio->shift;
+    eidx = SUBPAGE_IDX(end) >> mmio->shift;
 #if defined(DEBUG_SUBPAGE)
     printf("%s: %p start %08x end %08x idx %08x eidx %08x section %d\n", __func__, mmio, start, end, idx, eidx,
            section);
@@ -2093,10 +2134,12 @@ static subpage_t* subpage_init(FlatView* fv, hwaddr base)
 {
     subpage_t* mmio;
 
-    /* mmio->sub_section is set to PHYS_SECTION_UNASSIGNED with g_malloc0 */
-    mmio       = g_malloc0(sizeof(subpage_t) + TARGET_PAGE_SIZE * sizeof(uint16_t));
-    mmio->fv   = fv;
-    mmio->base = base;
+    mmio        = g_new0(subpage_t, 1);
+    mmio->shift = MIN(SUBPAGE_SHIFT_MAX, TARGET_PAGE_BITS);
+    /* sub_section starts out as PHYS_SECTION_UNASSIGNED, which is zero. */
+    mmio->sub_section = g_new0(uint16_t, TARGET_PAGE_SIZE >> mmio->shift);
+    mmio->fv          = fv;
+    mmio->base        = base;
     memory_region_init_io(&mmio->iomem, NULL, &subpage_ops, mmio, NULL, TARGET_PAGE_SIZE);
     mmio->iomem.subpage = true;
 #if defined(DEBUG_SUBPAGE)
