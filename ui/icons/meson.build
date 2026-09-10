@@ -11,7 +11,3 @@ install_data('qemu_32x32.bmp',
 
 install_data('qemu.svg',
              install_dir: qemu_icondir / 'hicolor' / 'scalable' / 'apps')
-
-install_data('CKQEMUBootSplash_512x512@2x.png',
-             rename: 'CKQEMUBootSplash@2x.png',
-             install_dir: qemu_icondir / 'hicolor' / '512x512' / 'apps')
