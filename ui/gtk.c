@@ -202,9 +202,9 @@ static void gd_update_caption(GtkDisplayState* s)
     bool        is_paused = !runstate_is_running();
     int         i;
 
-    if (qemu_name) { prefix = g_strdup_printf("ChefKiss Inferno (%s)", qemu_name); }
+    if (qemu_name) { prefix = g_strdup_printf("Inferno iOS port (%s)", qemu_name); }
     else {
-        prefix = g_strdup_printf("ChefKiss Inferno");
+        prefix = g_strdup_printf("Inferno iOS port");
     }
 
     if (s->ptr_owner != NULL && s->ptr_owner->window == NULL) { grab = _(" - Press Ctrl+Alt+G to release grab"); }

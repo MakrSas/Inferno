@@ -517,7 +517,7 @@ void apple_boot_populate_dt(AppleDTNode* root, AppleBootInfo* info, bool auto_bo
 
     apple_dt_set_prop_u64(child, "dram-base", info->dram_base);
     apple_dt_set_prop_u64(child, "dram-size", info->dram_size);
-    apple_dt_set_prop_str(child, "firmware-version", "ChefKiss Inferno");
+    apple_dt_set_prop_str(child, "firmware-version", "Inferno iOS port");
     apple_dt_set_prop_str(child, "system-firmware-version", QEMU_VERSION);
 
     apple_dt_set_prop_u32(child, "nvram-total-size", info->nvram_size);

@@ -1106,12 +1106,12 @@ static CGEventRef handleTapEvent(CGEventTapProxy proxy, CGEventType type, CGEven
     COCOA_DEBUG("QemuCocoaView: grabMouse\n");
 
     if (qemu_name) {
-        [[self window] setTitle:[NSString stringWithFormat:@"ChefKiss Inferno %s - (Press  " UC_CTRL_KEY " " UC_ALT_KEY
+        [[self window] setTitle:[NSString stringWithFormat:@"Inferno iOS port %s - (Press  " UC_CTRL_KEY " " UC_ALT_KEY
                                                             " G  to release Mouse)",
                                                            qemu_name]];
     }
     else {
-        [[self window] setTitle:@"ChefKiss Inferno - (Press  " UC_CTRL_KEY " " UC_ALT_KEY " G  to release Mouse)"];
+        [[self window] setTitle:@"Inferno iOS port - (Press  " UC_CTRL_KEY " " UC_ALT_KEY " G  to release Mouse)"];
     }
     [self hideCursor];
     CGAssociateMouseAndMouseCursorPosition(isAbsoluteEnabled);
@@ -1122,9 +1122,9 @@ static CGEventRef handleTapEvent(CGEventTapProxy proxy, CGEventType type, CGEven
 {
     COCOA_DEBUG("QemuCocoaView: ungrabMouse\n");
 
-    if (qemu_name) { [[self window] setTitle:[NSString stringWithFormat:@"ChefKiss Inferno %s", qemu_name]]; }
+    if (qemu_name) { [[self window] setTitle:[NSString stringWithFormat:@"Inferno iOS port %s", qemu_name]]; }
     else {
-        [[self window] setTitle:@"ChefKiss Inferno"];
+        [[self window] setTitle:@"Inferno iOS port"];
     }
     [self unhideCursor];
     CGAssociateMouseAndMouseCursorPosition(TRUE);
@@ -1230,7 +1230,7 @@ static CGEventRef handleTapEvent(CGEventTapProxy proxy, CGEventType type, CGEven
         [window setAcceptsMouseMovedEvents:YES];
         [window setCollectionBehavior:NSWindowCollectionBehaviorFullScreenPrimary];
         [window
-            setTitle:qemu_name ? [NSString stringWithFormat:@"ChefKiss Inferno %s", qemu_name] : @"ChefKiss Inferno"];
+            setTitle:qemu_name ? [NSString stringWithFormat:@"Inferno iOS port %s", qemu_name] : @"Inferno iOS port"];
         [window setContentView:cocoaView];
         [window makeKeyAndOrderFront:self];
         [window center];
@@ -1552,9 +1552,9 @@ static CGEventRef handleTapEvent(CGEventTapProxy proxy, CGEventType type, CGEven
     NSString*          icon_path   = [NSString stringWithUTF8String:icon_path_c];
     g_free(icon_path_c);
     NSImage*  icon    = [[NSImage alloc] initWithContentsOfFile:icon_path];
-    NSString* version = @"ChefKiss Inferno emulator version " QEMU_FULL_VERSION;
+    NSString* version = @"Inferno iOS port emulator version " QEMU_FULL_VERSION;
     NSString* copyright =
-        @QEMU_COPYRIGHT "\n\nChefKiss Inferno\nCopyright (c) 2023-2026 Visual Ehrmanntraut and Inferno team\n\n";
+        @QEMU_COPYRIGHT "\n\nInferno iOS port (unofficial)\nCopyright (c) 2023-2026 Visual Ehrmanntraut and Inferno team\n\n";
     NSDictionary* options;
     if (icon) {
         options = @{

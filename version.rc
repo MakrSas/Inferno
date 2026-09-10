@@ -13,12 +13,12 @@ FILESUBTYPE VFT2_UNKNOWN
   {
     BLOCK "040904E4"
     {
-      VALUE "CompanyName", "https://chefkiss.dev/applehax/qemu-as/"
-      VALUE "FileDescription", "ChefKiss Inferno, fork of the QEMU project with Apple Silicon guest support"
+      VALUE "CompanyName", "https://github.com/MakrSas/Inferno"
+      VALUE "FileDescription", "Inferno iOS port, an unofficial fork of Inferno with Apple Silicon guest support"
       VALUE "FileVersion", QEMU_VERSION
       VALUE "LegalCopyright", "Copyright ChefKiss and the Inferno team. Released under the GNU General Public License, version 3."
       VALUE "LegalTrademarks", "QEMU is a trademark of Fabrice Bellard."
-      VALUE "ProductName", "ChefKiss Inferno"
+      VALUE "ProductName", "Inferno iOS port"
     }
   }
   BLOCK "VarFileInfo"
