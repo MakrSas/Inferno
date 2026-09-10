@@ -669,7 +669,12 @@ static void adp_v4_read_and_draw_boot_splash(AppleDisplayPipeV4State* adp)
         if (path != NULL) { fp = fopen(path, "rb"); }
     }
     if (fp == NULL) {
-        error_setg(&error_abort, "Missing emulator branding.");
+        /*
+         * Forks and derivative builds may not ship the splash artwork (see
+         * ui/icons/CKBrandingNotice.md), so its absence is not an error: the
+         * panel simply stays dark until the guest draws.
+         */
+        g_free(path);
         return;
     }
     fread(sig, sizeof(sig), 1, fp);
