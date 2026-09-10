@@ -1,43 +1,55 @@
-# ChefKiss Inferno ![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/ChefKissInc/Inferno/build.yaml?style=for-the-badge) ![Written by humans, not AI](https://img.shields.io/badge/written_by_humans-not_ai-blue?style=for-the-badge)
+# Inferno, iOS port
 
-Cross-platform Apple ARM device emulation, based on very heavily-modified QEMU code.
+The emulator half of [Inferno for iPhone](https://github.com/MakrSas/Inferno-iOS): a fork of
+[Inferno](https://github.com/ChefKissInc/Inferno) by ChefKiss, carrying the changes needed to run it
+as a library inside an iPhone app. Build it, and the app, by the instructions there.
 
-> [!CAUTION]
-> Please consider donating/tipping to help continue the project's development,
-> keeping it free and open-source.
->
-> PayPal or credit/debit card: https://ko-fi.com/chefkiss
->
-> BTC: `bc1qgu56kptepex2csuzl5nhzc4vxuj8c6ggjzhcem`
->
-> SOL: `4PJU3iB5rimN9BNcpzduvmTnptJyedZiAd23so33SAdi`
->
-> ETH: `0x038A25849c23Bc5A736484351a8B6Ad71bC46676`
+> **Unofficial.** Not affiliated with or endorsed by ChefKiss. Inferno is by Visual Ehrmanntraut and
+> the Inferno team; if it is useful to you, consider [supporting them](https://ko-fi.com/chefkiss).
+> For Inferno itself, see [its repository](https://github.com/ChefKissInc/Inferno) and
+> [the guides](https://chefkiss.dev/guides/inferno/).
 
-## More info and usage
+## What this branch changes
 
-Please see [here](https://chefkiss.dev/applehax/inferno/) for more information about the project and how to use it.
+The `ios` branch sits on Inferno's `dev`.
 
-## Legal Disclaimers
+- **A library, not a program.** `-Dshared_lib=true` builds `libqemu-aarch64-softmmu.dylib`, and the
+  app calls `qemu_init` and `qemu_main_loop` itself. `CONFIG_IOS` tells iOS from macOS where their
+  APIs differ. (`meson.build`, `meson_options.txt`, `system/main.c`, `include/qemu/osdep.h`,
+  `block/file-posix.c`)
+- **Coroutines without signals.** iOS has no usable `makecontext`, and the `sigaltstack` backend
+  relies on `SIGUSR2`, which the debugger that JIT requires swallows. Coroutines use libucontext.
+  (`util/coroutine-ucontext.c`)
+- **JIT under TXM.** On iOS 26 and later the code buffer is mapped executable first and handed to the
+  attached debugger to bless, the way UTM does it. (`tcg/region.c`)
+- **The screen, in process.** Display and input for the embedding app, read straight from the
+  emulator's framebuffer rather than through VNC. (`ui/inferno-embed.c`, `include/ui/inferno-embed.h`)
+- **A USB host for networking.** The guest's USB port is answered in process by a CDC-NCM host that
+  hands its Ethernet to `-netdev user`, so the guest gets internet with no companion VM.
+  (`hw/net/apple-ncm-host.c`)
+- **A console that does not stall.** UART output is gathered and written in bursts, instead of two
+  system calls per character from the vCPU thread. (`hw/char/apple_uart.c`)
+- **Less memory per address space.** Subpage section tables use a coarse grid refined on demand,
+  which saves hundreds of megabytes on Apple machines. (`system/physmem.c`)
+- **Display size and scale as machine properties**, with the touch surface derived from them.
+  (`hw/arm/t8030.c`, `hw/input/mt-spi.c`)
+- **Android builds** against bionic. (`meson.build`, `util/oslib-posix.c`, `system/main.c`)
+- **No ChefKiss branding.** The boot splash artwork and the "ChefKiss Inferno" name are removed, as
+  [the branding notice](ui/icons/CKBrandingNotice.md) requires of forks, and the machine starts
+  without a splash. The name is gone from the version, the window and VNC titles and the device
+  tree; the copyright lines crediting the Inferno team stay. (`hw/display/apple_displaypipe_v4.c`,
+  `ui/icons/`, `VERSION`, `hw/arm/boot.c`, `system/vl.c`, `ui/`)
 
-“ChefKiss Inferno” is provided "as is", without warranty of any kind, express or implied, including but not limited to the warranties of merchantability, fitness for a particular purpose and noninfringement.
+## Issues
 
-By using this software, you acknowledge that you are solely responsible for how you use it. The “ChefKiss Inferno” project team is not responsible for any damage, legal issues, data loss, or other consequences arising from its use.
+Problems with this branch belong in [Inferno for iPhone's issues](https://github.com/MakrSas/Inferno-iOS/issues),
+not upstream: ChefKiss did not write these changes.
 
-This project is intended for lawful purposes only. Users are responsible for complying with all applicable laws, licenses, and agreements, including copyright, trademark, and End User License Agreements (EULAs).
+## Licence
 
-The “ChefKiss Inferno” project team does not condone or support piracy, copyright infringement, or any illegal activity.
+As Inferno's: GPL-3.0 for the project as a whole, ChefKiss's own code under AGPL-3.0, and code
+inherited from QEMU under its original terms. Each file says which. New files in this branch are
+AGPL-3.0-or-later. See [`LICENSE`](LICENSE).
 
-This derivative project (“ChefKiss Inferno”) is licensed under the GNU General Public License, version 3, with our own code licensed under the GNU Affero General Public License, version 3. See `LICENSE` for details.
-
-This was done due to other entities shadowing the project with proprietary, paid solutions based mostly verbatim on this project.
-
-The parts of QEMU which are licensed under the "version 2 or later" clause retain their original license restrictions and copyright holders.
-
-The parts that are not will be removed in subsequent commits, you may explicitly contact us for early/faster removal of your code if desired.
-
-Restrictions apply for the branding of the “ChefKiss Inferno” project, see [here](./ui/icons/CKBrandingNotice.md).
-
-QEMU is a copyright and trademark of Fabrice Bellard. QEMU, Fabrice Bellard, and the QEMU developers are unaffiliated with this project.
-
-Apple, Inc. is unaffiliated with this project. 
+Provided as is, without warranty of any kind. No Apple firmware, image or key is distributed here.
+Apple and the QEMU project are not affiliated with this fork.
