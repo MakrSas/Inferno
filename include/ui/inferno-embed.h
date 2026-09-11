@@ -84,6 +84,31 @@ void inferno_display_invalidate(void);
 InfernoFrameResult inferno_display_read(void* dst, size_t dst_size, InfernoFrameInfo* info);
 
 /*
+ * Where the frames go, for when there are fewer of them than there should be.
+ *
+ * `presents` counts what the machine showed — every `dpy_gfx_update` from the
+ * display pipe. `refreshes` counts how often QEMU's main loop got round to
+ * asking the machine to redraw, which is a different thing entirely: it is the
+ * one that suffers when the vCPUs are holding the big lock.
+ *
+ * Both are totals since the last read, and reading clears them.
+ */
+typedef struct InfernoDisplayStats
+{
+    uint64_t presents;
+    uint64_t refreshes;
+} InfernoDisplayStats;
+
+void inferno_display_stats(InfernoDisplayStats* out);
+
+/*
+ * Called by the display pipe when it has shown a frame. Counting the listener's
+ * own updates would not do: the machine reports its damage a row-span at a
+ * time, so one frame can arrive as a dozen of them.
+ */
+void inferno_display_note_present(void);
+
+/*
  * A touch at an absolute position in framebuffer pixels — the emulated panel
  * wants the finger where it is, not a cursor moved towards it.
  */

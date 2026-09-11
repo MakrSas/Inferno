@@ -447,6 +447,8 @@
 #
 # An enumeration of possible audio backend drivers.
 #
+# @iosaudio: audio output for iOS, through a RemoteIO audio unit
+#
 # @jack: JACK audio backend (since 5.1)
 #
 # Since: 4.0
@@ -456,6 +458,7 @@
             { 'name': 'alsa', 'if': 'CONFIG_AUDIO_ALSA' },
             { 'name': 'coreaudio', 'if': 'CONFIG_AUDIO_COREAUDIO' },
             { 'name': 'dsound', 'if': 'CONFIG_AUDIO_DSOUND' },
+            { 'name': 'iosaudio', 'if': 'CONFIG_AUDIO_IOSAUDIO' },
             { 'name': 'jack', 'if': 'CONFIG_AUDIO_JACK' },
             { 'name': 'oss', 'if': 'CONFIG_AUDIO_OSS' },
             { 'name': 'pa', 'if': 'CONFIG_AUDIO_PA' },
@@ -492,6 +495,8 @@
                    'if': 'CONFIG_AUDIO_COREAUDIO' },
     'dsound':    { 'type': 'AudiodevDsoundOptions',
                    'if': 'CONFIG_AUDIO_DSOUND' },
+    'iosaudio':  { 'type': 'AudiodevGenericOptions',
+                   'if': 'CONFIG_AUDIO_IOSAUDIO' },
     'jack':      { 'type': 'AudiodevJackOptions',
                    'if': 'CONFIG_AUDIO_JACK' },
     'oss':       { 'type': 'AudiodevOssOptions',

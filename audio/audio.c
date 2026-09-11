@@ -1728,6 +1728,9 @@ void audio_create_pdos(Audiodev* dev)
 #ifdef CONFIG_AUDIO_DSOUND
         CASE(DSOUND, dsound, );
 #endif
+#ifdef CONFIG_AUDIO_IOSAUDIO
+        CASE(IOSAUDIO, iosaudio, );
+#endif
 #ifdef CONFIG_AUDIO_JACK
         CASE(JACK, jack, Jack);
 #endif

@@ -22,6 +22,7 @@
 #include "block/aio.h"
 #include "hw/display/apple_displaypipe_v4.h"
 #include "hw/irq.h"
+#include "ui/inferno-embed.h"
 #include "hw/qdev-properties.h"
 #include "hw/registerfields.h"
 #include "qemu/cutils.h"
@@ -845,6 +846,7 @@ static void adp_v4_update_disp_bh(void* opaque)
 
     qatomic_or(&adp->int_status, R_CONTROL_INT_FRAME_PROCESSED_MASK);
     adp_v4_update_irqs(adp);
+    inferno_display_note_present();
 }
 
 // `display-timing-info`

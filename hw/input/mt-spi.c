@@ -154,7 +154,17 @@ struct AppleMTSPIState
  */
 #define MT_SENSOR_UNITS_PER_PIXEL_NUM (78)
 #define MT_SENSOR_UNITS_PER_PIXEL_DEN (10)
-#define MT_SENSOR_EDGE                (400) // 4.00 mm
+/*
+ * How close to the border a contact has to be before it is reported as coming
+ * from the edge. Four millimetres — what the panel itself uses — is 51 pixels
+ * here, and iOS holds such contacts back as candidates for an edge gesture. On
+ * a real phone a finger that far in is genuinely half off the sensor; ours is
+ * a mouse or a fingertip on somebody else's screen, exactly where it says it
+ * is. At four millimetres the right third of every switch in Settings fell
+ * into the zone and would not take a tap, so this is the width of a contact
+ * that really is clipped by the bezel.
+ */
+#define MT_SENSOR_EDGE                (100) // 1.00 mm
 
 static inline int32_t apple_mt_spi_surface_width(const AppleMTSPIState* s)
 {

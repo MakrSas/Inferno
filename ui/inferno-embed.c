@@ -51,6 +51,10 @@ typedef struct InfernoDisplay
 static InfernoDisplay             inferno_display;
 static DisplayChangeListener      inferno_dcl;
 
+/* Counted under the display's own lock; see InfernoDisplayStats. */
+static uint64_t inferno_presents;
+static uint64_t inferno_refreshes;
+
 static void damage_all_locked(InfernoDisplay* d)
 {
     if (d->surface == NULL) {
@@ -101,7 +105,36 @@ static void inferno_gfx_update(DisplayChangeListener* dcl, int x, int y, int w, 
  * Nothing here draws; this is what drives the machine's own redraw, exactly as
  * a window or a VNC client would.
  */
-static void inferno_refresh(DisplayChangeListener* dcl) { graphic_hw_update(dcl->con); }
+static void inferno_refresh(DisplayChangeListener* dcl)
+{
+    InfernoDisplay* d = &inferno_display;
+
+    WITH_QEMU_LOCK_GUARD(&d->lock) { inferno_refreshes++; }
+    graphic_hw_update(dcl->con);
+}
+
+void inferno_display_note_present(void)
+{
+    InfernoDisplay* d = &inferno_display;
+
+    if (!d->attached) { return; }
+    WITH_QEMU_LOCK_GUARD(&d->lock) { inferno_presents++; }
+}
+
+void inferno_display_stats(InfernoDisplayStats* out)
+{
+    InfernoDisplay* d = &inferno_display;
+
+    if (out == NULL) { return; }
+    memset(out, 0, sizeof(*out));
+    if (!d->attached) { return; }
+
+    QEMU_LOCK_GUARD(&d->lock);
+    out->presents     = inferno_presents;
+    out->refreshes    = inferno_refreshes;
+    inferno_presents  = 0;
+    inferno_refreshes = 0;
+}
 
 static const DisplayChangeListenerOps inferno_dcl_ops = {
     .dpy_name       = "inferno-embed",

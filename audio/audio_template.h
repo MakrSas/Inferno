@@ -328,6 +328,9 @@ AudiodevPerDirectionOptions* glue(audio_get_pdo_, TYPE)(Audiodev* dev)
 #ifdef CONFIG_AUDIO_SNDIO
         case AUDIODEV_DRIVER_SNDIO: return dev->u.sndio.TYPE;
 #endif
+#ifdef CONFIG_AUDIO_IOSAUDIO
+        case AUDIODEV_DRIVER_IOSAUDIO: return dev->u.iosaudio.TYPE;
+#endif
         case AUDIODEV_DRIVER_WAV: return dev->u.wav.TYPE;
 
         case AUDIODEV_DRIVER__MAX: break;

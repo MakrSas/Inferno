@@ -1361,6 +1361,14 @@ if not get_option('coreaudio').auto() or (host_os == 'darwin' and have_system)
                          required: get_option('coreaudio'))
 endif
 
+# iOS has no HAL, so the CoreAudio driver cannot be built there; this is the
+# RemoteIO one that takes its place. See audio/iosaudio.m.
+iosaudio = not_found
+if host_os == 'darwin' and host_machine.subsystem() == 'ios' and have_system
+  iosaudio = dependency('appleframeworks', modules: ['AudioToolbox', 'AVFoundation'],
+                        required: false)
+endif
+
 libcbor = not_found
 if not get_option('libcbor').auto() or have_system
   libcbor = dependency('libcbor', version: '>=0.7.0',
@@ -1601,6 +1609,7 @@ if have_system
   audio_drivers_available = {
     'alsa': alsa.found(),
     'coreaudio': coreaudio.found(),
+    'iosaudio': iosaudio.found(),
     'dsound': dsound.found(),
     'jack': jack.found(),
     'oss': oss.found(),
@@ -1615,7 +1624,7 @@ if have_system
 
   # Default to native drivers first, OSS second, SDL third
   audio_drivers_priority = \
-    [ 'pa', 'coreaudio', 'dsound', 'sndio', 'oss' ] + \
+    [ 'pa', 'iosaudio', 'coreaudio', 'dsound', 'sndio', 'oss' ] + \
     (host_os == 'linux' ? [] : [ 'sdl' ])
   audio_drivers_default = []
   foreach k: audio_drivers_priority
