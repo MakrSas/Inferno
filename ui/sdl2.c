@@ -422,12 +422,20 @@ static void handle_mousemotion(SDL_Event* ev)
             sdl_grab_start(scon);
         }
     }
+    /*
+     * The renderer is given a logical size equal to the guest's surface
+     * (sdl2-2d.c), and SDL translates pointer events into that space itself.
+     * They arrive here already in guest pixels, so scaling them again by the
+     * ratio of surface to window doubled every coordinate on a window half the
+     * height of the panel: aiming at an icon pressed the one below and to the
+     * right of it.
+     */
     surf_w = surface_width(scon->surface);
     surf_h = surface_height(scon->surface);
-    x      = (int64_t)ev->motion.x * surf_w / scr_w;
-    y      = (int64_t)ev->motion.y * surf_h / scr_h;
-    dx     = (int64_t)ev->motion.xrel * surf_w / scr_w;
-    dy     = (int64_t)ev->motion.yrel * surf_h / scr_h;
+    x      = ev->motion.x;
+    y      = ev->motion.y;
+    dx     = ev->motion.xrel;
+    dy     = ev->motion.yrel;
     if (gui_grab || qemu_input_is_absolute(scon->dcl.con) || absolute_enabled) {
         sdl_send_mouse_event(scon, dx, dy, x, y, ev->motion.state);
     }
@@ -444,8 +452,9 @@ static void handle_mousebutton(SDL_Event* ev)
 
     bev = &ev->button;
     SDL_GetWindowSize(scon->real_window, &scr_w, &scr_h);
-    x = (int64_t)bev->x * surface_width(scon->surface) / scr_w;
-    y = (int64_t)bev->y * surface_height(scon->surface) / scr_h;
+    /* Already in guest pixels; see handle_mousemotion. */
+    x = bev->x;
+    y = bev->y;
 
     if (!gui_grab && !qemu_input_is_absolute(scon->dcl.con)) {
         if (ev->type == SDL_MOUSEBUTTONUP && bev->button == SDL_BUTTON_LEFT) {
