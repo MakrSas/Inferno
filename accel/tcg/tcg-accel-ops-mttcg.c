@@ -39,6 +39,32 @@ typedef struct MttcgForceRcuNotifier
     CPUState* cpu;
 } MttcgForceRcuNotifier;
 
+#ifdef CONFIG_DARWIN
+    #include <pthread/qos.h>
+
+/*
+ * Darwin hands every thread pthread_create makes the default quality of
+ * service, whatever the creating thread was set to — measured, not assumed.
+ * On a phone that leaves the vCPUs as welcome on the efficiency cores as on
+ * the fast ones, which is not what a guest wants when the whole machine is
+ * waiting on them.
+ *
+ * Read from the environment rather than fixed, so that the two can be told
+ * apart on the device: the answer is a frame rate, and frame rates are only
+ * honest when measured there. Unset means the class is left alone.
+ */
+static void mttcg_apply_qos(void)
+{
+    const char* wanted = getenv("INFERNO_VCPU_QOS");
+
+    if (wanted == NULL) { return; }
+
+    if (!strcmp(wanted, "interactive")) { pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0); }
+    else if (!strcmp(wanted, "initiated")) { pthread_set_qos_class_self_np(QOS_CLASS_USER_INITIATED, 0); }
+    else if (!strcmp(wanted, "utility")) { pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0); }
+}
+#endif
+
 static void do_nothing(CPUState* cpu, run_on_cpu_data d) { }
 
 static void mttcg_force_rcu(Notifier* notify, void* data)
@@ -64,6 +90,10 @@ static void* mttcg_cpu_thread_fn(void* arg)
     CPUState*             cpu = arg;
 
     assert(tcg_enabled());
+
+#ifdef CONFIG_DARWIN
+    mttcg_apply_qos();
+#endif
 
     rcu_register_thread();
     force_rcu.notifier.notify = mttcg_force_rcu;

@@ -24,6 +24,8 @@
 #include "hw/misc/a7iop/rtkit.h"
 #include "hw/nvme/nvme.h"
 #include "hw/pci/msi.h"
+#include "qapi/error.h"
+#include "qemu/error-report.h"
 #include "qemu/log.h"
 
 #if 0
@@ -76,6 +78,10 @@ struct AppleANSState
     uint32_t  vendor_reg[NVME_APPLE_VENDOR_REG_SIZE / sizeof(uint32_t)];
     bool      started;
     PCIBus*   pci_bus;
+
+    // The node this controller was built from, so its namespace list can be
+    // rewritten once every namespace has been attached.
+    AppleDTNode* dt_node;
 };
 
 static void ascv2_core_reg_write(void* opaque, hwaddr addr, uint64_t data, unsigned size) { }
@@ -186,6 +192,54 @@ static const AppleRTKitOps ans_rtkit_ops = {
     .wakeup = apple_ans_start,
 };
 
+// iOS never enumerates the controller's namespaces. AppleEmbeddedNVMeController
+// reads the list out of the device tree instead — it says so itself, in
+// `SetNamespacesStruct: Obtained N namespaces from DT` — so a namespace that
+// exists only on the command line is invisible to the guest, and one described
+// in the tree but absent from the controller is worse than invisible.
+//
+// The property is therefore rebuilt here from the namespaces that were actually
+// attached, which is the only description of them that cannot drift. Each entry
+// is three little-endian words: the id, the type, and the size in logical
+// blocks. The root namespace reports zero for its size, as it does in Apple's
+// own tree, because it is the one that owns whatever is left of the device.
+//
+// The caller has to get the timing right, and the window is narrow: namespaces
+// given with `-device` do not exist until the machine has been built, while the
+// tree is serialised into guest memory soon after. t8030 calls this from
+// `t8030_memory_setup`, just after it unfinalises the tree — late enough that
+// every namespace is attached, early enough that the guest has not been handed
+// anything yet, and at the one moment a property may change length.
+void apple_ans_sync_dt_namespaces(SysBusDevice* sbd)
+{
+    AppleANSState* s = APPLE_ANS(sbd);
+    NvmeSubsystem* subsys;
+    uint32_t       entries[NVME_MAX_NAMESPACES * 3];
+    uint32_t       nsid;
+    uint32_t       count = 0;
+
+    if (s->nvme == NULL || s->dt_node == NULL) { return; }
+
+    subsys = s->nvme->subsys;
+    if (subsys == NULL) { return; }
+
+    for (nsid = 1; nsid <= NVME_MAX_NAMESPACES; nsid++) {
+        NvmeNamespace* ns = subsys->namespaces[nsid];
+        uint32_t       block_size;
+
+        if (ns == NULL) { continue; }
+
+        block_size                = ns->lbasz ? ns->lbasz : 4096;
+        entries[count * 3 + 0]    = cpu_to_le32(nsid);
+        entries[count * 3 + 1]    = cpu_to_le32(ns->params.nstype);
+        entries[count * 3 + 2]    = cpu_to_le32(ns->params.nstype == 1 ? 0 : (uint32_t)(ns->size / block_size));
+        count++;
+    }
+
+    apple_dt_set_prop(s->dt_node, "namespaces", count * 3 * sizeof(uint32_t), entries);
+    info_report("ANS: described %u namespace(s) to the guest", count);
+}
+
 SysBusDevice* apple_ans_from_node(AppleDTNode* node, AppleA7IOPVersion version, PCIBus* pci_bus)
 {
     DeviceState*   dev;
@@ -200,6 +254,8 @@ SysBusDevice* apple_ans_from_node(AppleDTNode* node, AppleA7IOPVersion version, 
     dev = qdev_new(TYPE_APPLE_ANS);
     s   = APPLE_ANS(dev);
     sbd = SYS_BUS_DEVICE(dev);
+
+    s->dt_node = node;
 
     prop = apple_dt_get_prop(node, "reg");
     assert_nonnull(prop);

@@ -152,6 +152,16 @@ struct AppleNCMHostState
     uint8_t    config_value;
     uint8_t    data_iface;
     uint8_t    data_alt;
+    /*
+     * How the device wants its blocks laid out, from GET_NTB_PARAMETERS. The
+     * size is the one that matters: it is the ceiling on how many datagrams may
+     * be packed into a single block. Zero means the device did not answer, and
+     * the conservative built-in limit is used instead.
+     */
+    uint32_t   ntb_out_max;
+    uint16_t   ntb_divisor;
+    uint16_t   ntb_remainder;
+    uint16_t   ntb_alignment;
     int64_t    last_rx;
     int64_t    last_nudge;
     /* How many times the guest has been prodded without the link coming up. */
@@ -181,8 +191,11 @@ struct AppleNCMHostState
     PendingOut out_pending[NCM_OUT_PENDING];
 
     /* Traffic counters, reported periodically: the only window into a link
-     * that has no other visible sign of life. */
-    uint64_t rx_frames, rx_bytes, tx_frames, tx_bytes;
+     * that has no other visible sign of life. Blocks are counted alongside
+     * frames because their ratio is the packing: one frame per block is what
+     * the slow version did, and anything near NCM_MAX_DGRAMS means the link is
+     * carrying as much per round trip as it can. */
+    uint64_t rx_frames, rx_bytes, tx_frames, tx_bytes, tx_blocks;
     int64_t  last_report;
 };
 
@@ -442,11 +455,15 @@ static bool select_ncm_config(AppleNCMHostState* s)
                         &actual)
             == USB_RET_SUCCESS)
         {
+            s->ntb_out_max   = ldl_le_p(&params[16]);
+            s->ntb_divisor   = lduw_le_p(&params[20]);
+            s->ntb_remainder = lduw_le_p(&params[22]);
+            s->ntb_alignment = lduw_le_p(&params[24]);
             info_report("apple-ncm-host: NTB OUT max %u, divisor %u, remainder %u, alignment %u",
-                        ldl_le_p(&params[16]), lduw_le_p(&params[20]), lduw_le_p(&params[22]),
-                        lduw_le_p(&params[24]));
+                        s->ntb_out_max, s->ntb_divisor, s->ntb_remainder, s->ntb_alignment);
         }
         else {
+            s->ntb_out_max = 0;
             warn_report("apple-ncm-host: GET_NTB_PARAMETERS did not answer");
         }
     }
@@ -632,56 +649,22 @@ static void out_submit(AppleNCMHostState* s, PendingOut* slot)
     usb_write_request(s, USB_TOKEN_OUT, s->ep_out, slot->block, slot->len, 0, slot->id);
 }
 
+/* At most this many datagrams share one block. */
+#define NCM_MAX_DGRAMS 16
+
 /*
- * One datagram per block: simple, and the guest is happy with it.
+ * The largest block this guest will accept.
  *
- * The write is not waited on — waiting here is what broke the link on a slow
- * host, where a queued DHCP offer sat behind a read that only completes when
- * the guest happens to transmit. Confirmation is matched up later by id.
+ * The device states it in GET_NTB_PARAMETERS and it is not the same as our own
+ * buffer — this one answers 12144 against a 16384 buffer. Sending more than it
+ * asked for would be a block it is entitled to reject, so the smaller of the
+ * two wins. A device that never answered keeps the old behaviour of one frame
+ * per block, which is slow but was never in doubt.
  */
-static void send_frame(AppleNCMHostState* s, const uint8_t* frame, int len)
+static uint32_t out_block_limit(AppleNCMHostState* s)
 {
-    const uint16_t header_len = 12;
-    const uint16_t ndp_len = 16;
-    const uint16_t data_offset = header_len + ndp_len;
-    uint16_t       total = data_offset + len;
-    PendingOut*    slot = NULL;
-    uint8_t*       block;
-
-    if (len <= 0 || total > NCM_MAX_BLOCK) { return; }
-
-    for (int i = 0; i < NCM_OUT_PENDING; i++) {
-        if (s->out_pending[i].block == NULL) {
-            slot = &s->out_pending[i];
-            break;
-        }
-    }
-    if (slot == NULL) { return; } /* the guest is not keeping up; drop, as a wire would */
-
-    block = g_malloc(total);
-    stl_le_p(&block[0], NTH16_SIGNATURE);
-    stw_le_p(&block[4], header_len);
-    stw_le_p(&block[6], s->tx_sequence++);
-    stw_le_p(&block[8], total);
-    stw_le_p(&block[10], header_len);
-
-    stl_le_p(&block[header_len + 0], NDP16_SIGNATURE);
-    stw_le_p(&block[header_len + 4], ndp_len);
-    stw_le_p(&block[header_len + 6], 0);
-    stw_le_p(&block[header_len + 8], data_offset);
-    stw_le_p(&block[header_len + 10], len);
-    stw_le_p(&block[header_len + 12], 0);
-    stw_le_p(&block[header_len + 14], 0);
-    memcpy(&block[data_offset], frame, len);
-
-    slot->block = block;
-    slot->len = total;
-    slot->tries = 0;
-
-    s->tx_frames++;
-    s->tx_bytes += len;
-    if (s->tx_frames <= 40) { describe_frame("to guest", frame, len, INT_MIN); }
-    out_submit(s, slot);
+    if (s->ntb_out_max == 0) { return 2048; }
+    return MIN(s->ntb_out_max, (uint32_t)NCM_MAX_BLOCK);
 }
 
 static void out_release(PendingOut* slot)
@@ -703,6 +686,102 @@ static NCMFrame* tx_pop(AppleNCMHostState* s)
         s->tx_count--;
     }
     return frame;
+}
+
+/* Returns a frame that did not fit, so the next block starts with it. */
+static void tx_push_front(AppleNCMHostState* s, NCMFrame* frame)
+{
+    QEMU_LOCK_GUARD(&s->tx_lock);
+    frame->next = s->tx_head;
+    s->tx_head = frame;
+    if (s->tx_tail == NULL) { s->tx_tail = frame; }
+    s->tx_count++;
+}
+
+/*
+ * Fills one block with as many queued frames as it will hold.
+ *
+ * One frame per block is what held the link to 615 KB/s into the guest while
+ * the other direction managed 1107: the guest packs its own blocks full, and we
+ * were paying a USB round trip — about two milliseconds — for every single
+ * frame. The endpoint cannot be made busier, because several outstanding
+ * transfers wedge it (hence NCM_OUT_PENDING of one), so the only lever left is
+ * to make each transfer carry more.
+ *
+ * The write is not waited on — waiting here is what broke the link on a slow
+ * host, where a queued DHCP offer sat behind a read that only completes when
+ * the guest happens to transmit. Confirmation is matched up later by id.
+ */
+static void send_pending(AppleNCMHostState* s)
+{
+    const uint16_t header_len = 12;
+    /* Room for the worst case is reserved up front so offsets can be laid out
+     * in one pass. The table then declares only what it used, and the slack
+     * before the first datagram is padding the offsets step over. */
+    const uint16_t ndp_room = 8 + 4 * (NCM_MAX_DGRAMS + 1);
+    const uint32_t limit = out_block_limit(s);
+    NCMFrame*      taken[NCM_MAX_DGRAMS];
+    uint16_t       offset[NCM_MAX_DGRAMS];
+    PendingOut*    slot = &s->out_pending[0];
+    uint32_t       at = ROUND_UP(header_len + ndp_room, 4);
+    int            count = 0;
+    uint16_t       ndp_len;
+    uint32_t       total;
+    uint8_t*       block;
+
+    if (slot->block != NULL) { return; }
+
+    while (count < NCM_MAX_DGRAMS) {
+        NCMFrame* frame = tx_pop(s);
+        if (frame == NULL) { break; }
+        if (frame->len <= 0) {
+            g_free(frame);
+            continue;
+        }
+        if (at + frame->len > limit) {
+            tx_push_front(s, frame); /* it belongs to the next block */
+            break;
+        }
+        taken[count] = frame;
+        offset[count] = at;
+        at += ROUND_UP(frame->len, 4);
+        count++;
+    }
+    if (count == 0) { return; }
+
+    ndp_len = 8 + 4 * (count + 1);
+    /* The device asked for lengths that divide by four with nothing left over. */
+    total = ROUND_UP(at, 4);
+    block = g_malloc0(total);
+
+    stl_le_p(&block[0], NTH16_SIGNATURE);
+    stw_le_p(&block[4], header_len);
+    stw_le_p(&block[6], s->tx_sequence++);
+    stw_le_p(&block[8], total);
+    stw_le_p(&block[10], header_len);
+
+    stl_le_p(&block[header_len + 0], NDP16_SIGNATURE);
+    stw_le_p(&block[header_len + 4], ndp_len);
+    stw_le_p(&block[header_len + 6], 0);
+
+    for (int i = 0; i < count; i++) {
+        stw_le_p(&block[header_len + 8 + i * 4], offset[i]);
+        stw_le_p(&block[header_len + 10 + i * 4], taken[i]->len);
+        memcpy(&block[offset[i]], taken[i]->data, taken[i]->len);
+        s->tx_frames++;
+        s->tx_bytes += taken[i]->len;
+        if (s->tx_frames <= 40) { describe_frame("to guest", taken[i]->data, taken[i]->len, INT_MIN); }
+        g_free(taken[i]);
+    }
+    /* A zero entry ends the table. */
+    stw_le_p(&block[header_len + 8 + count * 4], 0);
+    stw_le_p(&block[header_len + 10 + count * 4], 0);
+
+    slot->block = block;
+    slot->len = total;
+    slot->tries = 0;
+    s->tx_blocks++;
+    out_submit(s, slot);
 }
 
 /* Forgets everything in flight; used when the link drops. */
@@ -784,7 +863,6 @@ static void* apple_ncm_host_thread(void* opaque)
         uint8_t                 buffer[NCM_MAX_BLOCK];
         uint16_t                got = 0;
         int32_t                 status;
-        NCMFrame*               frame;
         int64_t                 now = g_get_monotonic_time();
         bool                    lost = false;
 
@@ -819,11 +897,8 @@ static void* apple_ncm_host_thread(void* opaque)
             }
         }
 
-        /* Take the next frame only once the previous one is confirmed. */
-        if (!lost && s->out_pending[0].block == NULL && (frame = tx_pop(s)) != NULL) {
-            send_frame(s, frame->data, frame->len);
-            g_free(frame);
-        }
+        /* Fill the next block only once the previous one is confirmed. */
+        if (!lost && s->out_pending[0].block == NULL) { send_pending(s); }
 
         if (lost) {
             warn_report("apple-ncm-host: link to the device lost");
@@ -856,8 +931,8 @@ static void* apple_ncm_host_thread(void* opaque)
             s->last_report = now;
             if (s->rx_frames || s->tx_frames) {
                 info_report("apple-ncm-host: from guest %" PRIu64 " frames/%" PRIu64 " B, "
-                            "to guest %" PRIu64 " frames/%" PRIu64 " B",
-                            s->rx_frames, s->rx_bytes, s->tx_frames, s->tx_bytes);
+                            "to guest %" PRIu64 " frames/%" PRIu64 " B in %" PRIu64 " blocks",
+                            s->rx_frames, s->rx_bytes, s->tx_frames, s->tx_bytes, s->tx_blocks);
             }
         }
 

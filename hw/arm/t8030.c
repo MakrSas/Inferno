@@ -439,8 +439,17 @@ static void t8030_memory_setup(AppleT8030MachineState* t8030)
     gsize              fsize;
     CarveoutAllocator* ca;
     CKPatcherRange*    seprom_range;
+    Object*            ans;
 
     apple_dt_unfinalise(t8030->device_tree);
+
+    // The guest never enumerates the NVMe controller: it takes the namespace
+    // list out of the device tree. So the list is rewritten here from the
+    // namespaces that were actually attached, and this is the one moment that
+    // works — every `-device` namespace exists by now, the tree is unfinalised
+    // so a property may still change length, and nothing has reached the guest.
+    ans = object_resolve_path_component(OBJECT(t8030), "ans");
+    if (ans != NULL) { apple_ans_sync_dt_namespaces(SYS_BUS_DEVICE(ans)); }
 
     carveout_memory_map = apple_dt_get_node(t8030->device_tree, "/chosen/carveout-memory-map");
 
