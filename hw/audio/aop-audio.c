@@ -117,7 +117,10 @@ type_init(apple_aop_audio_register_types);
 // - mcaN | Multi-Channel Audio (cluster N)
 // - apac | AOP Audio Controller?
 static const uint32_t apple_aop_devices[] = {
-    'edtC', 'acmm', 'aphc', 'lpfw', 'leap', 'aphd', 'aph ', 'ahdc', 'pcmM', 'lpai', 'mca0', 'mca1', 'apac',
+    // 'lpai' goes with its device tree node: advertised without one, the controller starts a microphone
+    // that never finishes, and a node with no device is a driver that waits forever. Either way the
+    // whole platform stays busy.
+    'edtC', 'acmm', 'aphc', 'lpfw', 'leap', 'aphd', 'aph ', 'ahdc', 'pcmM', 'mca0', 'mca1', 'apac',
 };
 
 static AppleAOPResult apple_aop_audio_get_prop(void* opaque, uint32_t prop, void* out)
