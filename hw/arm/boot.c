@@ -42,7 +42,7 @@
 
 static const char* KEEP_COMP[] = {
     "adbe0,s8000\0$",
-    // "audio-aop-mca2\0$",
+    "audio-aop-mca2\0$",
     // "alc,t8030\0$",
     // "audio-data,aop-audio-haptic\0$",
     // "audio-data,baseband-voice\0$",
