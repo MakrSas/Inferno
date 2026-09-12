@@ -42,19 +42,10 @@
 
 static const char* KEEP_COMP[] = {
     "adbe0,s8000\0$",
-    // "aop-audio\0$",
-    // "aop-audio-control\0$",
-    // "aop-audio-speaker\0$",
-    // "audio-aop-lp-mic-in\0$",
     // "audio-aop-mca2\0$",
-    // "audio-aop-pcmaudiomgr\0$",
     // "alc,t8030\0$",
     // "audio-data,aop-audio-haptic\0$",
-    // "audio-data,halogen\0$",
-    // "audio-data,hawking\0$",
     // "audio-data,baseband-voice\0$",
-    // "audio-data,dsp-debug1\0$",
-    // "audio-data,mikeybus-secondary\0$",
     // "audio-data,aop-audio-hpdb\0$",
     // "halle-sensor,aop-ad5860-config\0$",
     // "audio-aop-hall\0$",
@@ -65,12 +56,6 @@ static const char* KEEP_COMP[] = {
     // "aop-audio-hpdbg\0$",
     // "audio-data,aop-audio-hpdbg\0$",
     // "haptics-support,leap\0$",
-    // "audio,embedded-resource-manager\0$",
-    // "audio-control,cs35l27\0$",
-    // "audio-data,audio-loopback\0$",
-    // "audio-data,cs35l27\0$",
-    // "audio-data,cs42l77\0$",
-    // "audio-control,cs42l77\0$",
     "aes,s8000\0$",
     "aic,1\0$",
     "apcie-bridge\0$",
@@ -108,9 +93,6 @@ static const char* KEEP_COMP[] = {
     "iop,s8000\0$",
     "iop-nub,sep\0$",
     "lcd,pinot\0$",
-    // "mca-switch,t8030\0$",
-    // "mcaCluster,t8030\0$",
-    // "mca,t8030\0$",
     "mipi-dsim-1,synopsys\0$",
     "N104AP\0iPhone12,1\0AppleARM\0$",
     "N104DEV\0iPhone12,1\0AppleARM\0$",
@@ -156,6 +138,38 @@ static const char* KEEP_COMP[] = {
     "aapl,spmi\0$",
     "accbuck,fan53740\0$",
 };
+
+// The audio hardware reaches the guest only when `INFERNO_AUDIO` is set. Every one of these nodes
+// drags in a driver that waits on the ones next to it, so a half-described audio tree costs boot
+// time and idle CPU without producing sound — hence a switch rather than a permanent entry above.
+static const char* AUDIO_COMP[] = {
+    "aop-audio\0$",
+    "aop-audio-speaker\0$",
+    "aop-audio-control\0$",
+    // "audio-aop-lp-mic-in\0$",
+    "audio-aop-pcmaudiomgr\0$",
+    "audio-control,cs35l27\0$",
+    "audio-data,cs35l27\0$",
+    // "audio-control,cs42l77\0$",
+    // "audio-data,cs42l77\0$",
+    // "audio-data,halogen\0$",
+    // "audio-data,hawking\0$",
+    // "audio-data,dsp-debug1\0$",
+    // "audio-data,audio-loopback\0$",
+    // "audio-data,mikeybus-secondary\0$",
+    "audio,embedded-resource-manager\0$",
+    "mca,t8030\0$",
+    "mcaCluster,t8030\0$",
+    "mca-switch,t8030\0$",
+};
+
+static bool audio_dt_enabled(void)
+{
+    static int cached = -1;
+
+    if (cached < 0) { cached = getenv("INFERNO_AUDIO") != NULL; }
+    return cached != 0;
+}
 
 static const char* REM_NAMES[] = {
     "accel\0$",
@@ -264,6 +278,14 @@ static void apple_boot_process_dt_node(AppleDTNode* node, AppleDTNode* parent)
             if (memcmp(prop->data, KEEP_COMP[i], MIN(prop->len, sstrlen(KEEP_COMP[i]))) == 0) {
                 found = true;
                 break;
+            }
+        }
+        if (!found && audio_dt_enabled()) {
+            for (i = 0; i < ARRAY_SIZE(AUDIO_COMP); i++) {
+                if (memcmp(prop->data, AUDIO_COMP[i], MIN(prop->len, sstrlen(AUDIO_COMP[i]))) == 0) {
+                    found = true;
+                    break;
+                }
             }
         }
         if (!found) {

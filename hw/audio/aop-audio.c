@@ -21,7 +21,7 @@
 #include "hw/misc/aop.h"
 #include "qemu/units.h"
 
-#if 0
+#if 1
     #define AOP_DPRINTF(fmt, ...) fprintf(stderr, fmt "\n", ##__VA_ARGS__)
 #else
     #define AOP_DPRINTF(fmt, ...) \
@@ -130,7 +130,9 @@ static AppleAOPResult apple_aop_audio_get_prop(void* opaque, uint32_t prop, void
             break;
         case PROPERTY_DEVICE_COUNT    : stl_le_p(out, ARRAY_SIZE(apple_aop_devices)); break;
         case PROPERTY_IO_HANDLER_COUNT: stl_le_p(out, 0); break;
-        default                       : break;
+        default:
+            AOP_DPRINTF("AOPAudio GetProperty 0x%X — UNHANDLED, answering with nothing", prop);
+            break;
     }
 
     return AOP_RESULT_OK;
@@ -150,7 +152,7 @@ static AppleAOPResult apple_aop_audio_handle_command(void* opaque, uint16_t seq,
             stl_le_p(payload_out, apple_aop_devices[ldl_le_p(payload + COMMAND_HDR_LEN)]);
             break;
         case COMMAND_GET_DEVICE_PROP:
-            AOP_DPRINTF("AOPAudio GetDeviceProperty %X 0x%X", ldl_le_p(payload + COMMAND_HDR_LEN),
+            AOP_DPRINTF("AOPAudio GetDeviceProperty '%.4s' 0x%X", (const char*)payload + COMMAND_HDR_LEN,
                         ldl_le_p(payload + COMMAND_HDR_LEN + 4));
 
             switch (ldl_le_p(payload + COMMAND_HDR_LEN)) {
@@ -255,7 +257,13 @@ static AppleAOPResult apple_aop_audio_handle_command(void* opaque, uint16_t seq,
                     break;
             }
             break;
-        default: break;
+        default:
+            AOP_DPRINTF("AOPAudio command 0x%X — UNHANDLED, len %u, payload %08X %08X %08X",
+                        ldl_le_p(payload + sizeof(uint32_t)), len,
+                        len > COMMAND_HDR_LEN ? ldl_le_p(payload + COMMAND_HDR_LEN) : 0,
+                        len > COMMAND_HDR_LEN + 4 ? ldl_le_p(payload + COMMAND_HDR_LEN + 4) : 0,
+                        len > COMMAND_HDR_LEN + 8 ? ldl_le_p(payload + COMMAND_HDR_LEN + 8) : 0);
+            break;
     }
 
     return AOP_RESULT_OK;

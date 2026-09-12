@@ -177,29 +177,6 @@ struct AppleMCAState
     uint32_t             ring_used;
 };
 
-static void apple_mca_class_init(ObjectClass* klass, const void* data)
-{
-    DeviceClass* dc;
-
-    dc = DEVICE_CLASS(klass);
-
-    dc->desc           = "Apple Multi-Channel Audio";
-    dc->user_creatable = false;
-    // dc->realize = apple_mca_realize;
-    set_bit(DEVICE_CATEGORY_SOUND, dc->categories);
-}
-
-static const TypeInfo apple_mca_info = {
-    .name          = TYPE_APPLE_MCA,
-    .parent        = TYPE_SYS_BUS_DEVICE,
-    .instance_size = sizeof(AppleMCAState),
-    .class_init    = apple_mca_class_init,
-};
-
-static void apple_mca_register_types(void) { type_register_static(&apple_mca_info); }
-
-type_init(apple_mca_register_types);
-
 static uint32_t apple_mca_dma_into_ring(AppleMCAState* s, uint32_t want)
 {
     uint32_t done = 0;
@@ -453,6 +430,55 @@ static void apple_mca_out_callback(void* opaque, int avail)
     }
 }
 
+static void apple_mca_realize(DeviceState* dev, Error** errp)
+{
+    AppleMCAState* s = APPLE_MCA(dev);
+
+    // Registered here rather than at creation so that `audiodev`, which may
+    // name the backend, is already set. Failing is not fatal: a machine given
+    // `-audiodev none` and no backend of its own runs on, only silently.
+    if (AUD_register_card("mca", &s->card, NULL)) {
+        audsettings settings = {0};
+        settings.fmt         = AUDIO_FORMAT_S16;
+        settings.freq        = 48000;
+        settings.nchannels   = 2;
+        settings.endianness  = 0;    // LE
+        s->voice             = AUD_open_out(&s->card, s->voice, "mca.out", s, apple_mca_out_callback, &settings);
+        if (s->voice == NULL) { error_report("Failed to create voice for Multi-Channel Audio"); }
+    }
+    else {
+        error_report("Failed to create QEMU sound card for Multi-Channel Audio");
+    }
+}
+
+static const Property apple_mca_properties[] = {
+    DEFINE_AUDIO_PROPERTIES(AppleMCAState, card),
+};
+
+static void apple_mca_class_init(ObjectClass* klass, const void* data)
+{
+    DeviceClass* dc;
+
+    dc = DEVICE_CLASS(klass);
+
+    dc->desc           = "Apple Multi-Channel Audio";
+    dc->user_creatable = false;
+    dc->realize        = apple_mca_realize;
+    device_class_set_props(dc, apple_mca_properties);
+    set_bit(DEVICE_CATEGORY_SOUND, dc->categories);
+}
+
+static const TypeInfo apple_mca_info = {
+    .name          = TYPE_APPLE_MCA,
+    .parent        = TYPE_SYS_BUS_DEVICE,
+    .instance_size = sizeof(AppleMCAState),
+    .class_init    = apple_mca_class_init,
+};
+
+static void apple_mca_register_types(void) { type_register_static(&apple_mca_info); }
+
+type_init(apple_mca_register_types);
+
 SysBusDevice* apple_mca_create(AppleDTNode* node, AppleSIODMAEndpoint* tx_ep, AppleSIODMAEndpoint* rx_ep)
 {
     DeviceState*   dev;
@@ -495,19 +521,6 @@ SysBusDevice* apple_mca_create(AppleDTNode* node, AppleSIODMAEndpoint* tx_ep, Ap
     s->rx_ep = rx_ep;
 
     s->timer = timer_new_ns(QEMU_CLOCK_VIRTUAL, apple_mca_serialise, s);
-
-    if (AUD_register_card("mca", &s->card, NULL)) {
-        audsettings settings = {0};
-        settings.fmt         = AUDIO_FORMAT_S16;
-        settings.freq        = 48000;
-        settings.nchannels   = 2;
-        settings.endianness  = 0;    // LE
-        s->voice             = AUD_open_out(&s->card, s->voice, "mca.out", s, apple_mca_out_callback, &settings);
-        if (s->voice == NULL) { error_report("Failed to create voice for Multi-Channel Audio"); }
-    }
-    else {
-        error_report("Failed to create QEMU sound card for Multi-Channel Audio");
-    }
 
     return sbd;
 }
