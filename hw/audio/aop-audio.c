@@ -129,7 +129,8 @@ static AppleAOPResult apple_aop_audio_get_prop(void* opaque, uint32_t prop, void
             stl_le_p(out, 'aop ');
             break;
         case PROPERTY_DEVICE_COUNT    : stl_le_p(out, ARRAY_SIZE(apple_aop_devices)); break;
-        case PROPERTY_IO_HANDLER_COUNT: stl_le_p(out, 0); break;
+        case PROPERTY_IO_HANDLER_COUNT: stl_le_p(out, 1); break;
+        case PROPERTY_VERSION         : stl_le_p(out, 1); break;
         default:
             AOP_DPRINTF("AOPAudio GetProperty 0x%X — UNHANDLED, answering with nothing", prop);
             break;
@@ -238,7 +239,26 @@ static AppleAOPResult apple_aop_audio_handle_command(void* opaque, uint16_t seq,
                             break;
                     }
                     break;
+                default:
+                    // The IO handlers are asked the same question, and an
+                    // answer of nothing reads as a buffer of no bytes — which
+                    // is how the controller ends up with no resources at all.
+                    switch (ldl_le_p(payload + COMMAND_HDR_LEN + 4)) {
+                        case DEV_PROP_LEAP_FW_BUFFER_BYTES_MAX:
+                            stl_le_p(payload_out, DEV_PROP_LEAP_FW_BUFFER_BYTES_MAX_LEN);
+                            stq_le_p(payload_out + 4, 64 * KiB);
+                            break;
+                    }
+                    break;
             }
+            break;
+        case COMMAND_ATTACH_DEVICE:
+        case COMMAND_DETACH_DEVICE:
+            // The reply is four bytes wide; zero reads as success everywhere
+            // else in this protocol.
+            AOP_DPRINTF("AOPAudio %s '%.4s'", ldl_le_p(payload + sizeof(uint32_t)) == COMMAND_ATTACH_DEVICE
+                        ? "Attach" : "Detach", (const char*)payload + COMMAND_HDR_LEN);
+            stl_le_p(payload_out, 0);
             break;
         case COMMAND_SET_DEVICE_PROP:
             AOP_DPRINTF("AOPAudio SetDeviceProperty %X 0x%X", ldl_le_p(payload + COMMAND_HDR_LEN),
@@ -257,13 +277,15 @@ static AppleAOPResult apple_aop_audio_handle_command(void* opaque, uint16_t seq,
                     break;
             }
             break;
-        default:
-            AOP_DPRINTF("AOPAudio command 0x%X — UNHANDLED, len %u, payload %08X %08X %08X",
-                        ldl_le_p(payload + sizeof(uint32_t)), len,
-                        len > COMMAND_HDR_LEN ? ldl_le_p(payload + COMMAND_HDR_LEN) : 0,
-                        len > COMMAND_HDR_LEN + 4 ? ldl_le_p(payload + COMMAND_HDR_LEN + 4) : 0,
-                        len > COMMAND_HDR_LEN + 8 ? ldl_le_p(payload + COMMAND_HDR_LEN + 8) : 0);
+        default: {
+            g_autoptr(GString) hex = g_string_new(NULL);
+            uint32_t           i;
+
+            for (i = 0; i < len; i++) { g_string_append_printf(hex, "%02x", ((const uint8_t*)payload)[i]); }
+            AOP_DPRINTF("AOPAudio command 0x%X — UNHANDLED, len %u out %u, payload %s",
+                        ldl_le_p(payload + sizeof(uint32_t)), len, out_len, hex->str);
             break;
+        }
     }
 
     return AOP_RESULT_OK;
