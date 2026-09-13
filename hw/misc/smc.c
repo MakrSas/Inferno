@@ -229,7 +229,7 @@ static SMCResult apple_smc_mbse_write(SMCKey* key, SMCKeyData* data, const void*
     switch (value) {
         case 'susp':    // seems to mean suspend SoC, not AP.
         case 'offw': qemu_system_shutdown_request(SHUTDOWN_CAUSE_GUEST_SHUTDOWN); return SMC_RESULT_SUCCESS;
-        case 'rest': qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET); return SMC_RESULT_SUCCESS;
+        case 'rest': qemu_system_reset_request_from(SHUTDOWN_CAUSE_GUEST_RESET, "the SMC (key rest)"); return SMC_RESULT_SUCCESS;
         case 'waka':    // FIXME: Are we supposed to do anything here?
             return SMC_RESULT_SUCCESS;
         case 'slpa':    // Ditto

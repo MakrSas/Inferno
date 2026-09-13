@@ -95,6 +95,20 @@ static inline uint32_t wdt_get_chip_timer(AppleWDTState* s) { return wdt_get_clo
 
 static inline uint32_t wdt_get_sys_timer(AppleWDTState* s) { return wdt_get_clock(s) - s->reg.sys_timer; }
 
+/*
+ * A timer ran out and the machine is to reset. Which timer, and what the guest
+ * had set it to, goes into the line that reports the reset.
+ */
+static void wdt_expired(AppleWDTState* s, const char* which, uint32_t counter)
+{
+    /* Read by the main loop after this returns, so not on the stack. */
+    static char origin[80];
+
+    snprintf(origin, sizeof(origin), "the Apple watchdog (%s timer, set to %.1f s)", which,
+             (double)counter / (double)s->cntfrq_hz);
+    watchdog_perform_action_from(origin);
+}
+
 static void wdt_update(void* opaque)
 {
     AppleWDTState* s        = opaque;
@@ -105,7 +119,7 @@ static void wdt_update(void* opaque)
     if (s->reg.chip_control & WDOG_CTL_EN_RESET) {
         if (chip_tmr >= s->reg.chip_reset_counter) {
             trace_apple_wdt_chip_reset();
-            watchdog_perform_action();
+            wdt_expired(s, "chip", s->reg.chip_reset_counter);
             device_cold_reset(DEVICE(s));
             return;
         }
@@ -118,7 +132,7 @@ static void wdt_update(void* opaque)
     if (s->reg.sys_control & WDOG_CTL_EN_RESET) {
         if (sys_tmr >= s->reg.sys_reset_counter) {
             trace_apple_wdt_system_reset();
-            watchdog_perform_action();
+            wdt_expired(s, "system", s->reg.sys_reset_counter);
             device_cold_reset(DEVICE(s));
             return;
         }

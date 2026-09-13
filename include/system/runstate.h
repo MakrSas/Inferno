@@ -117,6 +117,8 @@ typedef enum WakeupReason
 } WakeupReason;
 
 void          qemu_system_reset_request(ShutdownCause reason);
+/* The same, naming who asks, for the line printed when the reset happens. */
+void          qemu_system_reset_request_from(ShutdownCause reason, const char* origin);
 void          qemu_system_suspend_request(void);
 void          qemu_register_suspend_notifier(Notifier* notifier);
 bool          qemu_wakeup_suspend_enabled(void);

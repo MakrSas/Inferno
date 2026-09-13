@@ -537,7 +537,13 @@ void qemu_system_guest_pvshutdown(void)
     qemu_system_shutdown_request(SHUTDOWN_CAUSE_GUEST_SHUTDOWN);
 }
 
-void qemu_system_reset_request(ShutdownCause reason)
+/*
+ * Who asked for the reset that is pending, for the line the main loop prints
+ * when it carries it out. NULL when the caller did not say.
+ */
+static const char* reset_origin;
+
+static void request_reset(ShutdownCause reason)
 {
     if (reboot_action == REBOOT_ACTION_SHUTDOWN && reason != SHUTDOWN_CAUSE_SUBSYSTEM_RESET) {
         shutdown_requested = reason;
@@ -551,6 +557,51 @@ void qemu_system_reset_request(ShutdownCause reason)
     }
     cpu_stop_current();
     qemu_notify_event();
+}
+
+void qemu_system_reset_request(ShutdownCause reason)
+{
+    reset_origin = NULL;
+    request_reset(reason);
+}
+
+void qemu_system_reset_request_from(ShutdownCause reason, const char* origin)
+{
+    reset_origin = origin;
+    request_reset(reason);
+}
+
+/*
+ * One line for each reset the machine carries out: who asked for it, and how
+ * long after the previous one. A guest caught in a loop resets hundreds of
+ * times, so past the first five only every hundredth is reported, with the
+ * time the hundred took.
+ */
+static void note_reset(ShutdownCause reason)
+{
+    static uint64_t count;
+    static int64_t  previous_ms;
+    static int64_t  batch_start_ms;
+    const char*     origin = reset_origin ? reset_origin : ShutdownCause_str(reason);
+    int64_t         now_ms = qemu_clock_get_ms(QEMU_CLOCK_REALTIME);
+
+    count += 1;
+    if (count == 1) { info_report("machine reset #1, asked for by %s", origin); }
+    else if (count <= 5) {
+        info_report("machine reset #%" PRIu64 ", asked for by %s, %.1f s after the previous one", count, origin,
+                    (now_ms - previous_ms) / 1000.0);
+        if (count == 5) {
+            info_report("from here on only every hundredth machine reset is reported");
+            batch_start_ms = now_ms;
+        }
+    }
+    else if (count % 100 == 0) {
+        info_report("machine reset #%" PRIu64 ", asked for by %s; %.0f s since reset #%" PRIu64, count, origin,
+                    (now_ms - batch_start_ms) / 1000.0, count == 100 ? (uint64_t)5 : count - 100);
+        batch_start_ms = now_ms;
+    }
+    previous_ms  = now_ms;
+    reset_origin = NULL;
 }
 
 static void qemu_system_suspend(void)
@@ -680,6 +731,7 @@ static bool main_loop_should_exit(int* status)
     }
     request = qemu_reset_requested();
     if (request) {
+        note_reset(request);
         pause_all_vcpus();
         qemu_system_reset(request);
         resume_all_vcpus();

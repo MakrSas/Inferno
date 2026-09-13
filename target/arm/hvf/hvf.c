@@ -949,7 +949,7 @@ static bool hvf_handle_psci_call(CPUState* cpu)
             }
             break;
         case QEMU_PSCI_0_2_FN_SYSTEM_RESET:
-            qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
+            qemu_system_reset_request_from(SHUTDOWN_CAUSE_GUEST_RESET, "PSCI SYSTEM_RESET");
             /*
              * QEMU reset and shutdown are async requests, but PSCI
              * mandates that we never return from the reset/shutdown

@@ -27,3 +27,5 @@
 /* in hw/watchdog.c */
 WatchdogAction get_watchdog_action(void);
 void           watchdog_perform_action(void);
+/* The same, naming the watchdog for the line printed when the machine resets. */
+void           watchdog_perform_action_from(const char* origin);

@@ -34,7 +34,7 @@ struct GPIO_PWR_State
 
 static void gpio_pwr_reset(void* opaque, int n, int level)
 {
-    if (level) { qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET); }
+    if (level) { qemu_system_reset_request_from(SHUTDOWN_CAUSE_GUEST_RESET, "the reset GPIO"); }
 }
 
 static void gpio_pwr_shutdown(void* opaque, int n, int level)

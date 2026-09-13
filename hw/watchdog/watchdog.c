@@ -39,14 +39,16 @@ WatchdogAction get_watchdog_action(void) { return watchdog_action; }
 /* This actually performs the "action" once a watchdog has expired,
  * ie. reboot, shutdown, exit, etc.
  */
-void watchdog_perform_action(void)
+void watchdog_perform_action(void) { watchdog_perform_action_from("a watchdog"); }
+
+void watchdog_perform_action_from(const char* origin)
 {
     trace_watchdog_perform_action(watchdog_action);
 
     switch (watchdog_action) {
         case WATCHDOG_ACTION_RESET: /* same as 'system_reset' in monitor */
             qapi_event_send_watchdog(WATCHDOG_ACTION_RESET);
-            qemu_system_reset_request(SHUTDOWN_CAUSE_GUEST_RESET);
+            qemu_system_reset_request_from(SHUTDOWN_CAUSE_GUEST_RESET, origin);
             break;
 
         case WATCHDOG_ACTION_SHUTDOWN: /* same as 'system_powerdown' in monitor */
