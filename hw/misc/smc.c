@@ -22,9 +22,13 @@
 #include "hw/misc/a7iop/rtkit.h"
 #include "hw/misc/smc.h"
 #include "qapi/error.h"
+#include "qapi/visitor.h"
+#include "qemu/atomic.h"
+#include "qemu/main-loop.h"
 #include "qemu/memalign.h"
 #include "qemu/queue.h"
 #include "system/runstate.h"
+#include "ui/inferno-embed.h"
 
 #if 0
     #include "qemu/log.h"
@@ -413,6 +417,185 @@ static const AppleRTKitOps apple_smc_rtkit_ops = {
     .boot_done = apple_smc_boot_done,
 };
 
+/* ------------------------------------------------------------------ */
+/* Battery                                                             */
+/* ------------------------------------------------------------------ */
+
+/*
+ * The battery the guest is shown.
+ *
+ * One word, and outside the device. The app reports the phone's own battery
+ * from its UI thread whenever it likes — before the machine exists, and across
+ * guest reboots, which reset the device — while the guest reads it from the
+ * emulator's threads. A single atomic word means the charge and the plug are
+ * never seen half-updated, and neither side has a lock to take.
+ */
+#define BATTERY_PERCENT  (0xFF)
+#define BATTERY_EXTERNAL BIT(8)
+#define BATTERY_CHARGING BIT(9)
+
+/* What the machine always showed before anyone reported anything. */
+static uint32_t apple_smc_battery = 69;
+
+#define BATTERY_MAX_CAPACITY         (31337)
+#define BATTERY_FULL_CHARGE_CAPACITY (BATTERY_MAX_CAPACITY * 98 / 100)
+
+/*
+ * The one SMC a machine has, kept for telling its guest that the battery
+ * changed. Set as the device is created, by which time the main loop exists.
+ */
+static AppleSMCState* apple_smc_instance;
+
+/*
+ * A power state notification. The guest answers sub-types 1, 3 and 6 alike, by
+ * reading every battery and charger key at once; nothing on its side names
+ * them, so the choice of 6 is ours.
+ */
+#define SMC_POWER_STATE_NOTIFY_BATTERY_CHANGED (6)
+
+static void apple_smc_battery_changed(void* opaque)
+{
+    AppleSMCState* s = qatomic_read(&apple_smc_instance);
+    KeyResponse    r = {0};
+
+    if (s == NULL || !s->is_booted) { return; }
+
+    r.status      = SMC_NOTIFICATION;
+    r.response[2] = SMC_POWER_STATE_NOTIFY_BATTERY_CHANGED;
+    r.response[3] = SMC_EVENT_POWER_STATE_NOTIFY;
+    apple_rtkit_send_user_msg(&s->parent_obj, kSMCKeyEndpoint, r.raw);
+}
+
+void inferno_battery_set(int32_t percent, bool external, bool charging)
+{
+    uint32_t word = MIN(MAX(percent, 0), 100);
+
+    if (external) { word |= BATTERY_EXTERNAL; }
+    /* Nothing charges without a cable, so one implies the other. */
+    if (charging) { word |= BATTERY_EXTERNAL | BATTERY_CHARGING; }
+
+    /*
+     * Left alone, the guest notices on its next poll, up to twenty seconds on;
+     * told, it reads the battery at once, and the bolt and the lock screen's
+     * charging picture follow within a few seconds. Only a change is worth
+     * telling — the app repeats itself every half minute — and the telling
+     * happens on the main loop, since the mailbox wants the big lock and the
+     * caller's thread has no business waiting for it.
+     */
+    if (qatomic_xchg(&apple_smc_battery, word) != word && qatomic_read(&apple_smc_instance) != NULL) {
+        aio_bh_schedule_oneshot(qemu_get_aio_context(), apple_smc_battery_changed, NULL);
+    }
+}
+
+static uint32_t apple_smc_battery_percent(void) { return qatomic_read(&apple_smc_battery) & BATTERY_PERCENT; }
+
+/*
+ * Every key the battery state shows through.
+ *
+ * The guest's AppleSmartBatteryManagerEmbedded is a Smart Battery Data driver
+ * with SMC keys standing in for the gas gauge's commands. It polls the lot every
+ * twenty seconds, and reads them all at once when told the power state changed.
+ *
+ *   B0UC  RemainingCapacity  -> CurrentCapacity. powerd shows B0UC / B0CM as
+ *                               the percentage, rounded, so B0UC is sized
+ *                               against B0CM and rounded the same way.
+ *   B0RM  raw remaining      -> AppleRawCurrentCapacity, against B0FC.
+ *   CHCE  cable in           -> ExternalConnected
+ *   CHCC  able to charge     -> ExternalChargeCapable
+ *   BSFC  fully charged      -> FullyCharged: in, and not charging
+ *   CHSC  charging           -> IsCharging, which is the bolt in the status
+ *                               bar. The cable alone does not light it.
+ *   CHNC  not-charging bits  -> ChargerData.NotChargingReason; zero only
+ *                               while charging
+ *   B0AC  current, B0IV its average: into the battery while charging
+ */
+static SMCResult apple_smc_battery_read(SMCKey* key, SMCKeyData* data, const void* in, uint8_t in_length)
+{
+    uint32_t word     = qatomic_read(&apple_smc_battery);
+    uint32_t percent  = word & BATTERY_PERCENT;
+    bool     external = word & BATTERY_EXTERNAL;
+    bool     charging = word & BATTERY_CHARGING;
+
+    switch (key->key) {
+        case 'B0UC': stw_le_p(data->data, (BATTERY_MAX_CAPACITY * percent + 50) / 100); break;
+        case 'B0RM': stw_le_p(data->data, (BATTERY_FULL_CHARGE_CAPACITY * percent + 50) / 100); break;
+        case 'CHCE':
+        case 'CHCC': stb_p(data->data, external); break;
+        case 'BSFC': stb_p(data->data, external && !charging); break;
+        case 'CHSC': stb_p(data->data, charging); break;
+        case 'CHNC': stq_le_p(data->data, charging ? 0 : 1); break;
+        case 'B0AC':
+        case 'B0IV': stw_le_p(data->data, charging ? 1000 : 0); break;
+        default    : g_assert_not_reached();
+    }
+
+    return SMC_RESULT_SUCCESS;
+}
+
+/*
+ * A key whose value is worked out on every read, and which otherwise looks to
+ * the guest exactly like the stored key it replaces. apple_smc_add_key_func()
+ * would mark it as a function in the attributes the guest can query, and the
+ * battery driver has only ever seen these as plain keys.
+ */
+static void apple_smc_add_live_key(AppleSMCState* s, uint32_t key, uint8_t size, SMCKeyType type,
+                                   SMCKeyAttribute attr, SMCKeyFunc* reader)
+{
+    SMCKey* key_entry;
+
+    apple_smc_add_key(s, key, size, type, attr, NULL);
+    key_entry         = apple_smc_get_key(s, key);
+    key_entry->opaque = s;
+    key_entry->read   = reader;
+}
+
+/* The same state as properties, so the rig can change it over QMP. */
+static void apple_smc_get_battery_percent(Object* obj, Visitor* v, const char* name, void* opaque, Error** errp)
+{
+    uint8_t value = apple_smc_battery_percent();
+
+    visit_type_uint8(v, name, &value, errp);
+}
+
+static void apple_smc_set_battery_percent(Object* obj, Visitor* v, const char* name, void* opaque, Error** errp)
+{
+    uint32_t word;
+    uint8_t  value;
+
+    if (!visit_type_uint8(v, name, &value, errp)) { return; }
+    if (value > 100) {
+        error_setg(errp, "battery-percent must be between 0 and 100");
+        return;
+    }
+    word = qatomic_read(&apple_smc_battery);
+    inferno_battery_set(value, word & BATTERY_EXTERNAL, word & BATTERY_CHARGING);
+}
+
+static bool apple_smc_get_battery_external(Object* obj, Error** errp)
+{
+    return qatomic_read(&apple_smc_battery) & BATTERY_EXTERNAL;
+}
+
+static void apple_smc_set_battery_external(Object* obj, bool value, Error** errp)
+{
+    uint32_t word = qatomic_read(&apple_smc_battery);
+
+    /* Pulling the cable stops the charging with it. */
+    inferno_battery_set(word & BATTERY_PERCENT, value, value && (word & BATTERY_CHARGING));
+}
+
+static bool apple_smc_get_battery_charging(Object* obj, Error** errp)
+{
+    return qatomic_read(&apple_smc_battery) & BATTERY_CHARGING;
+}
+
+static void apple_smc_set_battery_charging(Object* obj, bool value, Error** errp)
+{
+    uint32_t word = qatomic_read(&apple_smc_battery);
+
+    inferno_battery_set(word & BATTERY_PERCENT, word & BATTERY_EXTERNAL, value);
+}
+
 SysBusDevice* apple_smc_create(AppleDTNode* node, AppleA7IOPVersion version, uint64_t sram_size)
 {
     DeviceState*   dev;
@@ -428,22 +611,18 @@ SysBusDevice* apple_smc_create(AppleDTNode* node, AppleA7IOPVersion version, uin
     uint8_t        batt_feature_flags        = 0x0;
     uint16_t       batt_cycle_count          = 7;
     uint16_t       batt_avg_time_to_full     = 0xffff;    // not charging
-    uint16_t       batt_max_capacity         = 31337;
-    uint16_t       batt_full_charge_capacity = batt_max_capacity * 0.98;
-    // *0.69 shows as 67%/68% (console debug output) with full_charge_capacity
-    // of 98%
-    uint16_t batt_current_capacity   = batt_full_charge_capacity * 0.69;
-    uint16_t batt_remaining_capacity = batt_full_charge_capacity - batt_current_capacity;
+    uint16_t       batt_max_capacity         = BATTERY_MAX_CAPACITY;
+    uint16_t       batt_full_charge_capacity = BATTERY_FULL_CHARGE_CAPACITY;
     uint32_t battery_fw_version      = 0x201;
     uint8_t  battery_count           = 1;
     uint16_t batt_cell_voltage       = 4200;
-    int16_t  batt_actual_amperage    = 0x0;
     uint16_t batt_actual_voltage     = batt_cell_voltage;
 
     assert_cmphex(sram_size, <=, UINT32_MAX);
 
     dev = qdev_new(TYPE_APPLE_SMC_IOP);
     s   = APPLE_SMC_IOP(dev);
+    qatomic_set(&apple_smc_instance, s);
     rtk = APPLE_RTKIT(dev);
     sbd = SYS_BUS_DEVICE(dev);
 
@@ -489,6 +668,9 @@ SysBusDevice* apple_smc_create(AppleDTNode* node, AppleA7IOPVersion version, uin
 
     // should actually be a function for event notifications
     apple_smc_add_key(s, 'NESN', 4, SMC_KEY_TYPE_HEX, SMC_ATTR_W_LE, NULL);
+    // The guest writes 1 here to switch its notifications on; without the key
+    // it logged `Unable to enable notification interface (kSMCKeyNotFound)`.
+    apple_smc_add_key(s, 'NTAP', 1, SMC_KEY_TYPE_FLAG, SMC_ATTR_W_LE, NULL);
 
     apple_smc_add_key(s, 'AC-N', sizeof(ac_adapter_count), SMC_KEY_TYPE_UINT8, SMC_ATTR_R, &ac_adapter_count);
 
@@ -552,10 +734,8 @@ SysBusDevice* apple_smc_create(AppleDTNode* node, AppleA7IOPVersion version, uin
     apple_smc_add_key(s, 'B0CM', sizeof(batt_max_capacity), SMC_KEY_TYPE_UINT16, SMC_ATTR_R_LE, &batt_max_capacity);
     apple_smc_add_key(s, 'B0FC', sizeof(batt_full_charge_capacity), SMC_KEY_TYPE_UINT16, SMC_ATTR_R_LE,
                       &batt_full_charge_capacity);
-    apple_smc_add_key(s, 'B0UC', sizeof(batt_current_capacity), SMC_KEY_TYPE_UINT16, SMC_ATTR_R_LE,
-                      &batt_current_capacity);
-    apple_smc_add_key(s, 'B0RM', sizeof(batt_remaining_capacity), SMC_KEY_TYPE_UINT16, SMC_ATTR_R_LE,
-                      &batt_remaining_capacity);
+    apple_smc_add_live_key(s, 'B0UC', 2, SMC_KEY_TYPE_UINT16, SMC_ATTR_R_LE, apple_smc_battery_read);
+    apple_smc_add_live_key(s, 'B0RM', 2, SMC_KEY_TYPE_UINT16, SMC_ATTR_R_LE, apple_smc_battery_read);
     // should actually be a function
     apple_smc_add_key(s, 'B0FV', sizeof(battery_fw_version), SMC_KEY_TYPE_HEX, SMC_ATTR_R_LE, &battery_fw_version);
     const uint8_t bdd1 = 0x19;
@@ -572,12 +752,14 @@ SysBusDevice* apple_smc_create(AppleDTNode* node, AppleA7IOPVersion version, uin
     apple_smc_add_key(s, 'B0BL', 2, SMC_KEY_TYPE_UINT16, SMC_ATTR_R_LE, NULL);
     apple_smc_add_key(s, 'B0CA', 2, SMC_KEY_TYPE_UINT16, SMC_ATTR_R_LE, NULL);
     apple_smc_add_key(s, 'B0NC', 2, SMC_KEY_TYPE_UINT16, SMC_ATTR_R_LE, NULL);
-    apple_smc_add_key(s, 'B0IV', 2, SMC_KEY_TYPE_SINT16, SMC_ATTR_R_LE, NULL);
-    apple_smc_add_key(s, 'B0AC', sizeof(batt_actual_amperage), SMC_KEY_TYPE_SINT16, SMC_ATTR_R_LE,
-                      &batt_actual_amperage);
+    apple_smc_add_live_key(s, 'B0IV', 2, SMC_KEY_TYPE_SINT16, SMC_ATTR_R_LE, apple_smc_battery_read);
+    apple_smc_add_live_key(s, 'B0AC', 2, SMC_KEY_TYPE_SINT16, SMC_ATTR_R_LE, apple_smc_battery_read);
     apple_smc_add_key(s, 'B0AV', sizeof(batt_actual_voltage), SMC_KEY_TYPE_UINT16, SMC_ATTR_R_LE, &batt_actual_voltage);
-    const uint64_t chnc = 0x1;    // ???
-    apple_smc_add_key(s, 'CHNC', sizeof(chnc), SMC_KEY_TYPE_HEX, SMC_ATTR_R_LE, &chnc);
+    apple_smc_add_live_key(s, 'CHNC', 8, SMC_KEY_TYPE_HEX, SMC_ATTR_R_LE, apple_smc_battery_read);
+    apple_smc_add_live_key(s, 'CHCE', 1, SMC_KEY_TYPE_FLAG, SMC_ATTR_R_LE, apple_smc_battery_read);
+    apple_smc_add_live_key(s, 'CHCC', 1, SMC_KEY_TYPE_FLAG, SMC_ATTR_R_LE, apple_smc_battery_read);
+    apple_smc_add_live_key(s, 'BSFC', 1, SMC_KEY_TYPE_FLAG, SMC_ATTR_R_LE, apple_smc_battery_read);
+    apple_smc_add_live_key(s, 'CHSC', 1, SMC_KEY_TYPE_FLAG, SMC_ATTR_R_LE, apple_smc_battery_read);
     // should actually be a function
     apple_smc_add_key(s, 'CHAS', 4, SMC_KEY_TYPE_UINT32, SMC_ATTR_R_LE, NULL);
     // settings (as a whole) won't open/will crash if cha1 is missing
@@ -625,6 +807,13 @@ static void apple_smc_class_init(ObjectClass* klass, const void* data)
 
     dc->desc = "Apple System Management Controller IOP";
     set_bit(DEVICE_CATEGORY_MISC, dc->categories);
+
+    object_class_property_add(klass, "battery-percent", "uint8", apple_smc_get_battery_percent,
+                              apple_smc_set_battery_percent, NULL, NULL);
+    object_class_property_add_bool(klass, "battery-external", apple_smc_get_battery_external,
+                                   apple_smc_set_battery_external);
+    object_class_property_add_bool(klass, "battery-charging", apple_smc_get_battery_charging,
+                                   apple_smc_set_battery_charging);
 }
 
 static const TypeInfo apple_smc_info = {

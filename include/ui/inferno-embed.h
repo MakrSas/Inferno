@@ -124,6 +124,14 @@ void inferno_input_function_key(uint32_t number, bool pressed);
  */
 bool inferno_net_link_up(void);
 
+/*
+ * The battery the guest shows: a charge in percent, whether a cable is in, and
+ * whether it is charging through it. Lives in hw/misc/smc.c. Safe to call from
+ * any thread and at any time — a value reported before the machine exists is
+ * the one it starts with, and a guest reboot keeps it.
+ */
+void inferno_battery_set(int32_t percent, bool external, bool charging);
+
 #ifdef __cplusplus
 }
 #endif
