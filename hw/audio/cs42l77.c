@@ -22,6 +22,7 @@
 #include "hw/qdev-core.h"
 #include "hw/ssi/ssi.h"
 #include "qemu/bswap.h"
+#include "qemu/error-report.h"
 #include "qemu/lockable.h"
 
 #if 0
@@ -59,10 +60,26 @@ struct AppleCS42L77State
     uint16_t  length;
     uint8_t   cur_cmd;
     bool      data_ready;
+    bool      warned_range;
     uint8_t   regs[CS42L77_REG_SIZE];
 };
 
 static void apple_cs42l77_realize(SSIPeripheral* dev, Error** errp) { qemu_mutex_init(&APPLE_CS42L77(dev)->mutex); }
+
+/*
+ * The guest sets a 24-bit start address and reads or writes on from there, so a transfer that starts
+ * near the top of the map runs past the end of the register array. Past the end reads as zero and
+ * writes are dropped; the first such access is reported, with where it happened.
+ */
+static bool apple_cs42l77_in_range(AppleCS42L77State* s)
+{
+    if (s->address < CS42L77_REG_SIZE) { return true; }
+    if (!s->warned_range) {
+        s->warned_range = true;
+        warn_report("CS42L77: register access past the end of the map, at 0x%" PRIx64, s->address);
+    }
+    return false;
+}
 
 static uint32_t apple_cs42l77_transfer(SSIPeripheral* dev, uint32_t val)
 {
@@ -124,7 +141,7 @@ static uint32_t apple_cs42l77_transfer(SSIPeripheral* dev, uint32_t val)
                 DPRINTF("%s: val=0x%X -> 0x%X, address=0x%llX\n", __func__, val, ret, s->address);
             }
             else {
-                ret = s->regs[s->address];
+                ret = apple_cs42l77_in_range(s) ? s->regs[s->address] : 0;
                 DPRINTF("%s: address=0x%llX -> 0x%X\n", __func__, s->address, ret);
                 s->address += 1;
             }
@@ -147,7 +164,7 @@ static uint32_t apple_cs42l77_transfer(SSIPeripheral* dev, uint32_t val)
                 DPRINTF("%s: val=0x%X -> 0x%X, address=0x%llX\n", __func__, val, ret, s->address);
             }
             else {
-                ret = s->regs[s->address];
+                ret = apple_cs42l77_in_range(s) ? s->regs[s->address] : 0;
                 DPRINTF("%s: address=0x%llX -> 0x%X\n", __func__, s->address, ret);
                 s->address += 1;
             }
@@ -163,7 +180,7 @@ static uint32_t apple_cs42l77_transfer(SSIPeripheral* dev, uint32_t val)
             }
             else {
                 DPRINTF("%s: address=0x%llX <- 0x%X\n", __func__, s->address, val);
-                s->regs[s->address]  = (uint8_t)val;
+                if (apple_cs42l77_in_range(s)) { s->regs[s->address] = (uint8_t)val; }
                 s->address          += 1;
             }
             ret = STS_OK;
@@ -179,7 +196,7 @@ static uint32_t apple_cs42l77_transfer(SSIPeripheral* dev, uint32_t val)
             }
             else {
                 DPRINTF("%s: address=0x%llX <- 0x%X\n", __func__, s->address, val);
-                s->regs[s->address]  = (uint8_t)val;
+                if (apple_cs42l77_in_range(s)) { s->regs[s->address] = (uint8_t)val; }
                 s->address          += 1;
             }
             ret = STS_OK;
