@@ -304,7 +304,26 @@ static void apple_mca_sio_reg_write(void* opaque, hwaddr addr, uint64_t data, un
         case TXB_REG_BASE + REG_TX_CFG: s->sio_clusters[index].txb_config = data; break;
         case TXB_REG_BASE + REG_SIO_UNIT_CTL:
             if (index == 5) { apple_mca_set_running(s, (data & SIO_UNIT_CTL_ENABLE) != 0); }
-            s->sio_clusters[index].txb_control = data;
+            /*
+             * Before a start the driver fills the unit's DMA FIFO with zeros until it reads full, and it
+             * checks the FIFO is empty before a start and after a stop. On the hardware the serialiser
+             * takes the zeros as soon as the unit runs, and a reset flushes whatever is left. Nothing here
+             * ever took them: the FIFO stayed full after the first stream, fifoCheckEmpty failed, and every
+             * start after that — the speaker and the actuator's aggregate with it — was refused.
+             *
+             * A cluster has two DMA blocks, A then B, so the B side of cluster N is DMA block 2N + 1: the
+             * speaker, mca5b, fills block 11 (its node's reg says so), not block 5.
+             */
+            if (index * 2 + 1 < s->dma_cluster_count
+                && ((data & SIO_UNIT_CTL_RESET)
+                    || ((data & SIO_UNIT_CTL_ENABLE) && !(s->sio_clusters[index].txb_control & SIO_UNIT_CTL_ENABLE))))
+            {
+                fifo32_reset(&s->dma_clusters[index * 2 + 1].fifo);
+            }
+            // A reset leaves the unit's control at zero once it is done, and the driver polls for exactly
+            // that, a millisecond at a time: kept as written, it reads as a reset that never finished, and
+            // AppleMCA2Switch_TxCtl::reset panics with "reset SAC fail".
+            s->sio_clusters[index].txb_control = (data & SIO_UNIT_CTL_RESET) ? 0 : data;
             break;
     }
 }
