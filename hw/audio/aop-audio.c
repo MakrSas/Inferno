@@ -69,6 +69,8 @@
 #define DEV_PROP_CHANNEL_CTRL_LEN             (0x10)
 #define DEV_PROP_STREAM_FORMAT                (0x12E)
 #define DEV_PROP_STREAM_FORMAT_LEN            (0x10)
+// AppleAOPAudioDeviceProvider::setDevicePowerState writes the state it wants here, then reads DEV_PROP_STATE.
+#define DEV_PROP_REQUESTED_STATE (0xCA)
 
 struct AppleAOPAudioState
 {
@@ -79,7 +81,38 @@ struct AppleAOPAudioState
     uint32_t          enabled_chans;
     uint32_t          voice_trigger_chans;
     uint32_t          history_chans;
+    // Power states the guest has asked devices to enter; see apple_aop_audio_set_state().
+    struct
+    {
+        uint32_t device;
+        uint32_t state;
+    } states[16];
 };
+
+/*
+ * The driver asks for a power state through DEV_PROP_REQUESTED_STATE and then reads DEV_PROP_STATE until the
+ * device reports being there. Answered with a fixed state, it never was: the codec's MCLK manager ('acmm')
+ * repeated its request about once a minute for as long as the guest ran. The real AOP moves the device; here
+ * the device simply arrives. A state of zero means none was ever requested.
+ */
+static uint32_t apple_aop_audio_get_state(AppleAOPAudioState* s, uint32_t device)
+{
+    for (size_t i = 0; i < ARRAY_SIZE(s->states); i++) {
+        if (s->states[i].device == device) { return s->states[i].state; }
+    }
+    return 0;
+}
+
+static void apple_aop_audio_set_state(AppleAOPAudioState* s, uint32_t device, uint32_t state)
+{
+    for (size_t i = 0; i < ARRAY_SIZE(s->states); i++) {
+        if (s->states[i].device == device || s->states[i].device == 0) {
+            s->states[i].device = device;
+            s->states[i].state  = state;
+            return;
+        }
+    }
+}
 
 static void apple_aop_audio_class_init(ObjectClass* klass, const void* data)
 {
@@ -117,10 +150,10 @@ type_init(apple_aop_audio_register_types);
 // - mcaN | Multi-Channel Audio (cluster N)
 // - apac | AOP Audio Controller?
 static const uint32_t apple_aop_devices[] = {
-    // 'lpai' goes with its device tree node: advertised without one, the controller starts a microphone
-    // that never finishes, and a node with no device is a driver that waits forever. Either way the
-    // whole platform stays busy.
-    'edtC', 'acmm', 'aphc', 'lpfw', 'leap', 'aphd', 'aph ', 'ahdc', 'pcmM', 'mca0', 'mca1', 'apac',
+    // 'lpai' goes with its device tree node, and that node with the CS42L77 its function-codec_lpmic
+    // names. Without the microphone at all the controller has neither an input handler nor a mic
+    // device, cannot hand out buffers, and restarts for as long as the guest runs.
+    'edtC', 'acmm', 'aphc', 'lpfw', 'leap', 'aphd', 'aph ', 'ahdc', 'pcmM', 'lpai', 'mca0', 'mca1', 'apac',
 };
 
 static AppleAOPResult apple_aop_audio_get_prop(void* opaque, uint32_t prop, void* out)
@@ -146,6 +179,12 @@ static AppleAOPResult apple_aop_audio_handle_command(void* opaque, uint16_t seq,
                                                      void* payload_out, uint32_t out_len)
 {
     AppleAOPAudioState* s = opaque;
+    /*
+     * Answers are built here and copied out only as far as the guest's buffer goes. Its size is the
+     * guest's to choose, and a property written in full into a smaller one would run past the end of
+     * the heap buffer the endpoint allocated for it.
+     */
+    uint8_t out[64] = { 0 };
 
     if (payload == NULL || len < COMMAND_HDR_LEN || ldl_le_p(payload) != 0xFFFFFFFF) { return AOP_RESULT_ERROR; }
 
@@ -153,7 +192,7 @@ static AppleAOPResult apple_aop_audio_handle_command(void* opaque, uint16_t seq,
         case COMMAND_GET_DEVICE_ID:
             AOP_DPRINTF("AOPAudio GetDeviceID %d", ldl_le_p(payload + COMMAND_HDR_LEN));
 
-            stl_le_p(payload_out, apple_aop_devices[ldl_le_p(payload + COMMAND_HDR_LEN)]);
+            stl_le_p(out, apple_aop_devices[ldl_le_p(payload + COMMAND_HDR_LEN)]);
             break;
         case COMMAND_GET_DEVICE_PROP:
             AOP_DPRINTF("AOPAudio GetDeviceProperty '%.4s' 0x%X", (const char*)payload + COMMAND_HDR_LEN,
@@ -163,48 +202,48 @@ static AppleAOPResult apple_aop_audio_handle_command(void* opaque, uint16_t seq,
                 case 'lpai':
                     switch (ldl_le_p(payload + COMMAND_HDR_LEN + 4)) {
                         case DEV_PROP_STATE:
-                            stl_le_p(payload_out, DEV_PROP_STATE_LEN);
-                            stl_le_p(payload_out + 4, 'idle');
+                            stl_le_p(out, DEV_PROP_STATE_LEN);
+                            stl_le_p(out + 4, 'idle');
                             break;
                         case DEV_PROP_CHANNEL_CTRL:
-                            stl_le_p(payload_out, DEV_PROP_CHANNEL_CTRL_LEN);
-                            stl_le_p(payload_out + 4, s->supported_chans);
-                            stl_le_p(payload_out + 8, s->enabled_chans);
-                            stl_le_p(payload_out + 12, s->voice_trigger_chans);
-                            stl_le_p(payload_out + 16, s->history_chans);
+                            stl_le_p(out, DEV_PROP_CHANNEL_CTRL_LEN);
+                            stl_le_p(out + 4, s->supported_chans);
+                            stl_le_p(out + 8, s->enabled_chans);
+                            stl_le_p(out + 12, s->voice_trigger_chans);
+                            stl_le_p(out + 16, s->history_chans);
                             break;
                         case DEV_PROP_STREAM_FORMAT:
-                            stl_le_p(payload_out, DEV_PROP_STREAM_FORMAT_LEN);
-                            stl_le_p(payload_out + 4, 'pcm ');
-                            stl_le_p(payload_out + 8, 48000);
-                            stl_le_p(payload_out + 12, 2);
-                            stl_le_p(payload_out + 16, 2);
+                            stl_le_p(out, DEV_PROP_STREAM_FORMAT_LEN);
+                            stl_le_p(out + 4, 'pcm ');
+                            stl_le_p(out + 8, 48000);
+                            stl_le_p(out + 12, 2);
+                            stl_le_p(out + 16, 2);
                             break;
                         case DEV_PROP_SUPPORTS_HISTORICAL_DATA:
-                            stl_le_p(payload_out, DEV_PROP_SUPPORTS_HISTORICAL_DATA_LEN);
-                            stl_le_p(payload_out + 4, 0);
+                            stl_le_p(out, DEV_PROP_SUPPORTS_HISTORICAL_DATA_LEN);
+                            stl_le_p(out + 4, 0);
                             break;
                     }
                     break;
                 case 'lai ':
                     switch (ldl_le_p(payload + COMMAND_HDR_LEN + 4)) {
                         case DEV_PROP_STATE:
-                            stl_le_p(payload_out, DEV_PROP_STATE_LEN);
-                            stl_le_p(payload_out + 4, 'idle');
+                            stl_le_p(out, DEV_PROP_STATE_LEN);
+                            stl_le_p(out + 4, 'idle');
                             break;
                         case DEV_PROP_SUPPORTS_HISTORICAL_DATA:
-                            stl_le_p(payload_out, DEV_PROP_SUPPORTS_HISTORICAL_DATA_LEN);
-                            stl_le_p(payload_out + 4, 0);
+                            stl_le_p(out, DEV_PROP_SUPPORTS_HISTORICAL_DATA_LEN);
+                            stl_le_p(out + 4, 0);
                             break;
                     }
                     break;
                 case 'mca0':
                 case 'mca1':
                     switch (ldl_le_p(payload + COMMAND_HDR_LEN + 4)) {
-                        case DEV_PROP_MCA_RX_STATUS: stl_le_p(payload_out, DEV_PROP_MCA_RX_STATUS_LEN); break;
-                        case DEV_PROP_MCA_TX_STATUS: stl_le_p(payload_out, DEV_PROP_MCA_TX_STATUS_LEN); break;
+                        case DEV_PROP_MCA_RX_STATUS: stl_le_p(out, DEV_PROP_MCA_RX_STATUS_LEN); break;
+                        case DEV_PROP_MCA_TX_STATUS: stl_le_p(out, DEV_PROP_MCA_TX_STATUS_LEN); break;
                         case DEV_PROP_MCA_RX0_SHIM_OVERRUN:
-                            stl_le_p(payload_out, DEV_PROP_MCA_RX0_SHIM_OVERRUN_LEN);
+                            stl_le_p(out, DEV_PROP_MCA_RX0_SHIM_OVERRUN_LEN);
                             break;
                     }
                     break;
@@ -212,8 +251,8 @@ static AppleAOPResult apple_aop_audio_handle_command(void* opaque, uint16_t seq,
                 case 'apac':
                     switch (ldl_le_p(payload + COMMAND_HDR_LEN + 4)) {
                         case DEV_PROP_STATE:
-                            stl_le_p(payload_out, DEV_PROP_STATE_LEN);
-                            stl_le_p(payload_out + 4, 'pwrd');
+                            stl_le_p(out, DEV_PROP_STATE_LEN);
+                            stl_le_p(out + 4, 'pwrd');
                             break;
                     }
                     break;
@@ -221,24 +260,24 @@ static AppleAOPResult apple_aop_audio_handle_command(void* opaque, uint16_t seq,
                 case 'aph ':
                     switch (ldl_le_p(payload + COMMAND_HDR_LEN + 4)) {
                         case DEV_PROP_STATE:
-                            stl_le_p(payload_out, DEV_PROP_STATE_LEN);
-                            stl_le_p(payload_out + 4, 'pw1 ');
+                            stl_le_p(out, DEV_PROP_STATE_LEN);
+                            stl_le_p(out + 4, 'pw1 ');
                             break;
                     }
                     break;
                 case DEV_PCM_MGR:
                     switch (ldl_le_p(payload + COMMAND_HDR_LEN + 4)) {
                         case DEV_PROP_PCM_NUM_SUPPORTED_ASSETS:
-                            stl_le_p(payload_out, DEV_PROP_PCM_NUM_SUPPORTED_ASSETS_LEN);
-                            stl_le_p(payload_out + 4, 2);
+                            stl_le_p(out, DEV_PROP_PCM_NUM_SUPPORTED_ASSETS_LEN);
+                            stl_le_p(out + 4, 2);
                             break;
                     }
                     break;
                 case DEV_LEAP_FW:
                     switch (ldl_le_p(payload + COMMAND_HDR_LEN + 4)) {
                         case DEV_PROP_LEAP_FW_BUFFER_BYTES_MAX:
-                            stl_le_p(payload_out, DEV_PROP_LEAP_FW_BUFFER_BYTES_MAX_LEN);
-                            stq_le_p(payload_out + 4, 128 * KiB);
+                            stl_le_p(out, DEV_PROP_LEAP_FW_BUFFER_BYTES_MAX_LEN);
+                            stq_le_p(out + 4, 128 * KiB);
                             break;
                     }
                     break;
@@ -248,8 +287,8 @@ static AppleAOPResult apple_aop_audio_handle_command(void* opaque, uint16_t seq,
                     // is how the controller ends up with no resources at all.
                     switch (ldl_le_p(payload + COMMAND_HDR_LEN + 4)) {
                         case DEV_PROP_LEAP_FW_BUFFER_BYTES_MAX:
-                            stl_le_p(payload_out, DEV_PROP_LEAP_FW_BUFFER_BYTES_MAX_LEN);
-                            stq_le_p(payload_out + 4, 64 * KiB);
+                            stl_le_p(out, DEV_PROP_LEAP_FW_BUFFER_BYTES_MAX_LEN);
+                            stq_le_p(out + 4, 64 * KiB);
                             break;
                     }
                     break;
@@ -261,8 +300,25 @@ static AppleAOPResult apple_aop_audio_handle_command(void* opaque, uint16_t seq,
             // else in this protocol.
             AOP_DPRINTF("AOPAudio %s '%.4s'", ldl_le_p(payload + sizeof(uint32_t)) == COMMAND_ATTACH_DEVICE
                         ? "Attach" : "Detach", (const char*)payload + COMMAND_HDR_LEN);
-            stl_le_p(payload_out, 0);
+            stl_le_p(out, 0);
             break;
+        case COMMAND_REGISTER_ACCESS: {
+            /*
+             * A register read or write on a device behind the AOP: after the header come the target's
+             * id, four bytes of which one says write, then the address and the width, both big-endian,
+             * and on a write the value as the last byte of the packet.
+             *
+             * The answer stays all zeros on purpose. Handing back what the guest had written lets its
+             * driver walk further into a setup this model cannot finish, and the audio server then
+             * hangs with no devices at all; zeros leave it with a working route.
+             */
+            const uint8_t* body = (const uint8_t*)payload + COMMAND_HDR_LEN;
+
+            AOP_DPRINTF("AOPAudio RegisterAccess '%.4s' %s 0x%X (%u bytes)%s", (const char*)body,
+                        body[6] ? "write" : "read", ldl_be_p(body + 8), ldl_be_p(body + 12),
+                        body[6] ? "" : ", answering zeros");
+            break;
+        }
         case COMMAND_SET_DEVICE_PROP:
             AOP_DPRINTF("AOPAudio SetDeviceProperty %X 0x%X", ldl_le_p(payload + COMMAND_HDR_LEN),
                         ldl_le_p(payload + COMMAND_HDR_LEN + 4));
@@ -291,6 +347,41 @@ static AppleAOPResult apple_aop_audio_handle_command(void* opaque, uint16_t seq,
         }
     }
 
+    // Power states, whatever the device: see apple_aop_audio_set_state().
+    if (len >= COMMAND_HDR_LEN + 8) {
+        uint32_t command  = ldl_le_p(payload + sizeof(uint32_t));
+        uint32_t device   = ldl_le_p(payload + COMMAND_HDR_LEN);
+        uint32_t property = ldl_le_p(payload + COMMAND_HDR_LEN + 4);
+        uint32_t state;
+
+        if (command == COMMAND_SET_DEVICE_PROP && property == DEV_PROP_REQUESTED_STATE) {
+            g_autoptr(GString) hex       = g_string_new(NULL);
+            const uint8_t*     candidate = (const uint8_t*)payload + COMMAND_HDR_LEN + 32;
+            bool               fourcc    = len >= COMMAND_HDR_LEN + 36;
+
+            // After the value's length comes a 48-byte request: the device's id, a request number, a
+            // timestamp, two zero words, and then the state wanted ('idle', for 'acmm'). All of it goes to the
+            // log; the state is taken only when it reads as a four-character code.
+            for (uint32_t i = COMMAND_HDR_LEN + 8; i < len; i++) {
+                g_string_append_printf(hex, "%02x", ((const uint8_t*)payload)[i]);
+            }
+            AOP_DPRINTF("AOPAudio '%.4s' requests a state: %s", (const char*)payload + COMMAND_HDR_LEN, hex->str);
+
+            for (int i = 0; fourcc && i < 4; i++) { fourcc = candidate[i] >= 0x20 && candidate[i] < 0x7F; }
+            if (fourcc) { apple_aop_audio_set_state(s, device, ldl_le_p(candidate)); }
+        }
+        else if (command == COMMAND_GET_DEVICE_PROP && property == DEV_PROP_STATE) {
+            AOP_DPRINTF("AOPAudio '%.4s' state asked for, %u bytes of room", (const char*)payload + COMMAND_HDR_LEN,
+                        out_len);
+            if ((state = apple_aop_audio_get_state(s, device)) != 0) {
+                memset(out, 0, sizeof(out));
+                stl_le_p(out, DEV_PROP_STATE_LEN);
+                stl_le_p(out + 4, state);
+            }
+        }
+    }
+
+    if (payload_out != NULL) { memcpy(payload_out, out, MIN(out_len, sizeof(out))); }
     return AOP_RESULT_OK;
 }
 

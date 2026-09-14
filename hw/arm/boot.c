@@ -146,17 +146,41 @@ static const char* AUDIO_COMP[] = {
     "aop-audio\0$",
     "aop-audio-speaker\0$",
     "aop-audio-control\0$",
-    // "audio-aop-lp-mic-in\0$",
+    "audio-aop-lp-mic-in\0$",
     "audio-aop-pcmaudiomgr\0$",
     "audio-control,cs35l27\0$",
     "audio-data,cs35l27\0$",
-    // "audio-control,cs42l77\0$",
-    // "audio-data,cs42l77\0$",
-    // "audio-data,halogen\0$",
-    // "audio-data,hawking\0$",
-    // "audio-data,dsp-debug1\0$",
-    // "audio-data,audio-loopback\0$",
-    // "audio-data,mikeybus-secondary\0$",
+    "audio-control,cs42l77\0$",
+    "audio-data,cs42l77\0$",
+    // The CS42L77's function-halogen_master, -hawk_master, -dsp-debug1_master and -msp_master name
+    // these four data nodes. With them removed, AppleCS42L77Audio::start waits for providers that
+    // never appear, its SPI nub stays busy and unmatched, and the registry never goes quiet.
+    "audio-data,halogen\0$",
+    "audio-data,hawking\0$",
+    "audio-data,dsp-debug1\0$",
+    "audio-data,mikeybus-secondary\0$",
+    "audio-data,audio-loopback\0$",
+    // alc0 and alc2 are the I2S links the AOP drives on its own; their control lives behind the
+    // AOP device ids 'aph ' and 'aphd'. Their children are the headphone debug and haptic data
+    // nodes, and a kept parent with a stripped child leaves the driver waiting.
+    "alc,t8030\0$",
+    "aop-audio-hpdbg\0$",
+    "audio-data,aop-audio-hpdbg\0$",
+    // The actuator counts as a transducer: with its whole chain absent the audio server finds no
+    // built-in output at all and leaves the route empty. The chain runs from the AOP's haptic manager
+    // and LEAP down to the data node on alc2, and it only comes up whole.
+    "aop-audio-haptic\0$",
+    "audio-aop-hapticmgr\0$",
+    // The actuator's own audio device; the audio server builds a second aggregate around it, whose IO
+    // needs the DMA drain in t8030_create_actuator_drain to ever finish.
+    "audio-data,aop-audio-haptic\0$",
+    "audio-aop-haptic-leap\0$",
+    // The haptics support interface is what the audio server counts as the actuator's transducer; drop
+    // it and the route comes up empty. It carries three calibration fields out of syscfg, which this
+    // machine has none of — see apple_dt_prop_placeholder_len.
+    "haptics-support,leap\0$",
+    "audio-aop-hall\0$",
+    "halle-sensor,aop-ad5860-config\0$",
     "audio,embedded-resource-manager\0$",
     "mca,t8030\0$",
     "mcaCluster,t8030\0$",
@@ -170,6 +194,7 @@ static bool audio_dt_enabled(void)
     if (cached < 0) { cached = getenv("INFERNO_AUDIO") != NULL; }
     return cached != 0;
 }
+
 
 static const char* REM_NAMES[] = {
     "accel\0$",
@@ -263,6 +288,25 @@ static const char* srawmemchr(const char* str, int chr)
 
 static uint64_t sstrlen(const char* str) { return srawmemchr(str, '$') - str; }
 
+// Names blacklisted below that the audio tree still needs. `aop-mca` is the AOP's own multi-channel
+// audio controller: without it the AOP audio devices have no link to describe and the guest builds
+// no output stream for them.
+static const char* AUDIO_NAMES[] = {
+    "aop-mca\0$",
+};
+
+static bool audio_dt_keeps_name(const void* name, uint32_t len)
+{
+    size_t i;
+
+    if (!audio_dt_enabled()) { return false; }
+
+    for (i = 0; i < ARRAY_SIZE(AUDIO_NAMES); i++) {
+        if (memcmp(name, AUDIO_NAMES[i], MIN(len, sstrlen(AUDIO_NAMES[i]))) == 0) { return true; }
+    }
+    return false;
+}
+
 static void apple_boot_process_dt_node(AppleDTNode* node, AppleDTNode* parent)
 {
     GList*       iter  = NULL;
@@ -299,7 +343,7 @@ static void apple_boot_process_dt_node(AppleDTNode* node, AppleDTNode* parent)
 
     if ((prop = apple_dt_get_prop(node, "name")) != NULL) {
         assert_nonnull(prop->data);
-        for (i = 0; i < ARRAY_SIZE(REM_NAMES); i++) {
+        for (i = 0; !audio_dt_keeps_name(prop->data, prop->len) && i < ARRAY_SIZE(REM_NAMES); i++) {
             uint64_t size = MIN(prop->len, sstrlen(REM_NAMES[i]));
             if (memcmp(prop->data, REM_NAMES[i], size) == 0) {
                 assert_nonnull(parent);

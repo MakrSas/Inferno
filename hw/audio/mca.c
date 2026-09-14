@@ -171,6 +171,7 @@ struct AppleMCAState
     SWVoiceOut*          voice;
     QEMUTimer*           timer;
     int64_t              last_ns;
+    int64_t              rx_last_ns;
     bool                 running;
     uint8_t              ring[MCA_RING_SIZE];
     uint32_t             ring_head;
@@ -217,6 +218,27 @@ static void apple_mca_serialise(void* opaque)
 
     now = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
 
+    /*
+     * The capture side runs on the port's own clock rather than on how much playback the guest had
+     * queued. Tying it to the playback side means a stream that only records — the speaker's current
+     * and voltage feedback while a ringtone plays, a recording app — is never fed at all, and the
+     * thread waiting on that transfer never comes back.
+     */
+    {
+        uint64_t rx_frames;
+
+        rx_frames = muldiv64(now - s->rx_last_ns, MCA_FRAME_RATE, NANOSECONDS_PER_SECOND);
+        rx_frames = MIN(rx_frames, (uint64_t)MCA_QUANTUM_BYTES * MCA_MAX_CATCHUP / MCA_FRAME_BYTES);
+
+        if (rx_frames != 0) {
+            // TX 2ch, RX 4ch. FIXME
+            apple_sio_dma_blit(s->rx_ep, 0, rx_frames * (MCA_FRAME_BYTES * 2));
+            s->rx_last_ns += muldiv64(rx_frames, NANOSECONDS_PER_SECOND, MCA_FRAME_RATE);
+        }
+
+        if (now - s->rx_last_ns > MCA_MAX_DEBT_NS) { s->rx_last_ns = now; }
+    }
+
     if (now <= s->last_ns) {
         timer_mod_ns(s->timer, now + MCA_QUANTUM_NS);
         return;
@@ -230,8 +252,13 @@ static void apple_mca_serialise(void* opaque)
         pulled = apple_mca_dma_into_ring(s, due);
         frames = pulled / MCA_FRAME_BYTES;
 
-        // TX 2ch, RX 4ch. FIXME
-        apple_sio_dma_blit(s->rx_ep, 0, frames * (MCA_FRAME_BYTES * 2));
+        // Stopped, the samples go nowhere — the voice is inactive — but they still have to be taken,
+        // and what was taken is thrown away rather than played on the next start. See
+        // apple_mca_set_running().
+        if (!s->running) {
+            s->ring_head = 0;
+            s->ring_used = 0;
+        }
 
         if (now - s->last_ns > MCA_MAX_DEBT_NS) { s->last_ns = now; }
 
@@ -250,13 +277,15 @@ static void apple_mca_set_running(AppleMCAState* s, bool running)
     AUD_set_active_out(s->voice, running);
     AUD_set_volume_out(s->voice, !running, 255, 255);
 
-    if (running) {
-        s->last_ns = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
-        timer_mod_ns(s->timer, s->last_ns + MCA_QUANTUM_NS);
-    }
-    else {
-        timer_del(s->timer);
-    }
+    /*
+     * The timer is armed either way. A transfer the guest queued still has to be consumed once it has
+     * stopped the unit, or the thread that queued it waits for a completion that never comes — an
+     * uninterruptible wait, which on a pause takes the audio server down with it and every sound in
+     * the system until the machine is rebooted.
+     */
+    s->last_ns    = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    s->rx_last_ns = s->last_ns;
+    timer_mod_ns(s->timer, s->last_ns + MCA_QUANTUM_NS);
 }
 
 static void apple_mca_sio_reg_write(void* opaque, hwaddr addr, uint64_t data, unsigned size)
@@ -437,6 +466,11 @@ static void apple_mca_realize(DeviceState* dev, Error** errp)
     // Registered here rather than at creation so that `audiodev`, which may
     // name the backend, is already set. Failing is not fatal: a machine given
     // `-audiodev none` and no backend of its own runs on, only silently.
+    // Armed from the start: the guest may queue a transfer before it ever enables the unit.
+    s->last_ns    = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    s->rx_last_ns = s->last_ns;
+    timer_mod_ns(s->timer, s->last_ns + MCA_QUANTUM_NS);
+
     if (AUD_register_card("mca", &s->card, NULL)) {
         audsettings settings = {0};
         settings.fmt         = AUDIO_FORMAT_S16;
