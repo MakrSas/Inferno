@@ -548,12 +548,29 @@ typedef struct TCGIOMMUNotifier
     bool          active;
 } TCGIOMMUNotifier;
 
+static void tcg_iommu_flush_cpu(CPUState* cpu, run_on_cpu_data data) { tlb_flush(cpu); }
+
 static void tcg_iommu_unmap_notify(IOMMUNotifier* n, IOMMUTLBEntry* iotlb)
 {
     TCGIOMMUNotifier* notifier = container_of(n, TCGIOMMUNotifier, n);
 
     if (!notifier->active) { return; }
-    tlb_flush(notifier->cpu);
+    /*
+     * The IOMMU changes on whichever thread wrote to it, which is seldom the thread of the CPU
+     * whose TLB this is: on the t8030 a DART mapping revoked by an application core is one the
+     * SEP core, or another application core, has translated through. tlb_flush works on the
+     * calling thread's TLB — it frees and reallocates the tables it resizes — while their owner
+     * goes on reading them without a lock. Done from here, the owner read freed memory as TLB
+     * entries and wrote guest data wherever those pointed: a heap that malloc then spun in
+     * forever, dirty bitmaps with ASCII for pointers, "Bad ram pointer". A flush for another CPU
+     * is queued to that CPU instead, the way tcg_commit hands over a changed memory map.
+     */
+    if (notifier->cpu->halt_cond && !qemu_cpu_is_self(notifier->cpu)) {
+        async_run_on_cpu(notifier->cpu, tcg_iommu_flush_cpu, RUN_ON_CPU_NULL);
+    }
+    else {
+        tlb_flush(notifier->cpu);
+    }
     notifier->active = false;
     /* We leave the notifier struct on the list to avoid reallocating it later.
      * Generally the number of IOMMUs a CPU deals with will be small.

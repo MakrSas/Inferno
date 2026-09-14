@@ -357,7 +357,13 @@ static void apple_dart_notify_remap(AppleDARTMapperInstance* mapper, uint32_t in
     event.entry.addr_mask = HWADDR_MAX;
     memory_region_notify_iommu(iommu, 0, event);
 
-    IOMMU_NOTIFIER_FOREACH (notifier, iommu) { memory_region_iommu_replay(iommu, notifier); }
+    // A replay walks the whole page table, and only a notifier that asked for mappings gets anything
+    // out of it. TCG registers one notifier per CPU that has translated through this stream, for unmaps
+    // alone, and drops every mapping it is handed — so for those the walk was pure cost, paid again on
+    // each TLB operation the guest issues.
+    IOMMU_NOTIFIER_FOREACH (notifier, iommu) {
+        if ((notifier->notifier_flags & IOMMU_NOTIFIER_MAP) != 0) { memory_region_iommu_replay(iommu, notifier); }
+    }
 }
 
 static void apple_dart_mapper_reg_write(void* opaque, hwaddr addr, uint64_t data, unsigned size)
