@@ -49,6 +49,11 @@ bool arm_aarch64_fallback_emu_single(CPUState* cpu, AddressSpace* as, ArmAarch64
 
     bool success = true;
     switch (inst & 0x7FC00000) {
+        // The no-allocate pair (LDNP/STNP) differs from the signed-offset pair only
+        // in a cache hint, which means nothing to a device access. The guest's audio
+        // drivers read their registers that way, and without these labels the machine
+        // dies on the first such read under HVF.
+        case 0x28400000:      // ldnp
         case 0x29400000: {    // ldp signed offset
             uint32_t dst1     = inst & 0x1F;
             uint64_t base     = get_reg(cpu, (inst >> 5) & 0x1F);
@@ -73,9 +78,10 @@ bool arm_aarch64_fallback_emu_single(CPUState* cpu, AddressSpace* as, ArmAarch64
             else {
                 success = false;
             }
-            if (!success) { fprintf(stderr, "%s: LDP, success=%s\n", __func__, success ? "true" : "false"); }
+            if (!success) { fprintf(stderr, "%s: LDP/LDNP, success=%s\n", __func__, success ? "true" : "false"); }
             break;
         }
+        case 0x28000000:      // stnp
         case 0x29000000: {    // stp signed offset
             uint64_t src1     = get_reg(cpu, inst & 0x1F);
             uint64_t base     = get_reg(cpu, (inst >> 5) & 0x1F);
@@ -95,7 +101,7 @@ bool arm_aarch64_fallback_emu_single(CPUState* cpu, AddressSpace* as, ArmAarch64
             success = address_space_write(as, arm_aarch64_fallback_emu_vtop(cpu, addr), MEMTXATTRS_UNSPECIFIED, data,
                                           reg_size * 2)
                       == MEMTX_OK;
-            if (!success) { fprintf(stderr, "%s: STP, success=%s\n", __func__, success ? "true" : "false"); }
+            if (!success) { fprintf(stderr, "%s: STP/STNP, success=%s\n", __func__, success ? "true" : "false"); }
             break;
         }
         default:
