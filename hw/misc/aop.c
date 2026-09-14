@@ -556,8 +556,12 @@ static void apple_aop_ep_handle_message(void* opaque, uint8_t ep, uint64_t msg)
                             g_free(actual_out_payload);
                         }
                         else {
+                            // Past the result word there are out_len bytes; actual_out_len counts the word as well.
+                            // Given that size, a handler that fills its buffer writes four bytes past the end of the
+                            // allocation, into the next block on the heap, and malloc later spins in the damaged
+                            // freelist with the guest stopped around it.
                             res = s->descr->handle_command(s->opaque, seq, actual_in_payload, actual_in_len,
-                                                           actual_out_payload, actual_out_len);
+                                                           actual_out_payload, out_len);
                         }
 
                         stl_le_p(out_payload, res);
