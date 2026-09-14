@@ -176,10 +176,17 @@ struct AppleUartState
  * loop is what draws the guest's screen. `qemu_chr_fe_write_all` waits for a
  * reader that may have stopped reading, and when it did the picture died with
  * it a couple of minutes after the socket filled. So the write is the
- * non-blocking one, and whatever will not go now goes on the next flush.
+ * non-blocking one.
  *
- * Nothing is lost by that: the chardev logs only the bytes the backend actually
- * took, and logs the rest when they are offered again.
+ * What the backend takes only part of, the chardev logs only part of, and the
+ * rest goes, and is logged, on the next flush. A write refused outright is
+ * another matter — nobody connected to the socket, or a reader that has
+ * stopped reading — because the chardev then logs the whole buffer there and
+ * then (qemu_chr_write_buffer). That buffer is dropped. Offered again, it went
+ * into the log again: every millisecond, and once more for every character
+ * that arrived while the buffer was full, so a guest that had printed a few
+ * megabytes left a log of hundreds, the same sixteen kilobytes over and over,
+ * each copy one more boot or panic to anyone counting them.
  */
 static void apple_uart_tx_flush(AppleUartState* s)
 {
@@ -188,7 +195,10 @@ static void apple_uart_tx_flush(AppleUartState* s)
     if (s->txlen == 0) { return; }
 
     sent = qemu_chr_fe_write(&s->chr, s->txbuf, s->txlen);
-    if (sent < 0) { sent = 0; }
+    if (sent < 0) {
+        s->txlen = 0;
+        return;
+    }
 
     if ((uint32_t)sent < s->txlen) {
         s->txlen -= (uint32_t)sent;
