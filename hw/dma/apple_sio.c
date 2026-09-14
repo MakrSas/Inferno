@@ -214,6 +214,8 @@ static void apple_sio_dma_del_buffers(AppleSIODMAEndpoint* ep)
     QTAILQ_FOREACH_SAFE (buf, &ep->buffers, next, buf_next) { apple_sio_dma_destroy_buffer(ep, buf); }
 }
 
+static void apple_sio_dma_writeback(AppleSIOState* s, AppleSIODMAEndpoint* ep, SIODMABuffer* buf);
+
 // -- internal references --
 // Firestorm$Inferno/18A5351d/sio.bndb@000030e4{sio_endpoint::handle_message}+0x64
 // -- end internal references --
@@ -224,7 +226,17 @@ static void apple_sio_dma_stop(AppleSIOState* s, AppleSIODMAEndpoint* ep)
     SIOMessage    m   = {0};
     AppleRTKit*   rtk = &s->parent_obj;
 
-    QTAILQ_FOREACH_SAFE (buf, &ep->buffers, next, buf_next) { apple_sio_dma_destroy_buffer(ep, buf); }
+    /*
+     * Every transfer still out comes back completed, however little of it was done. The kernel's stop
+     * waits, uninterruptibly, for the channel to go idle, and a channel goes idle only once every command
+     * it handed out has come back. Dropped quietly, they left the audio server's IO thread asleep in
+     * AppleSmartIODMA::_stopDMA for good — the first time right after the actuator's first vibration —
+     * and every sound in the system went with it.
+     */
+    QTAILQ_FOREACH_SAFE (buf, &ep->buffers, next, buf_next) {
+        if (!buf->mapped) { buf->start_timestamp = apple_sio_get_cur_ts(s); }
+        apple_sio_dma_writeback(s, ep, buf);
+    }
 
     m.op = OP_COMPLETE;
     m.ep = ep->id;
