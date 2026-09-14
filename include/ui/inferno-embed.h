@@ -132,6 +132,35 @@ bool inferno_net_link_up(void);
  */
 void inferno_battery_set(int32_t percent, bool external, bool charging);
 
+/*
+ * The guest's vibration: how hard it drove its taptic engine and at what
+ * frequency, one frame per INFERNO_HAPTIC_FRAME_MS of the actuator's own
+ * samples. Lives in hw/audio/haptics.c.
+ */
+#define INFERNO_HAPTIC_FRAME_MS 10
+
+typedef struct InfernoHapticFrame
+{
+    /*
+     * How hard, as the guest's own haptics engine counts it: its intensity,
+     * from nearly 0 up to 1. Exactly 0 only while still.
+     */
+    float level;
+    /* The drive's frequency in hertz, 0 while still. */
+    float frequency;
+} InfernoHapticFrame;
+
+/*
+ * Waits up to `timeout_ms` for the guest to have driven its actuator, then
+ * copies out up to `max` frames, oldest first, and returns how many. Frames
+ * come while the actuator moves; when it stops there is one frame of level 0,
+ * and then nothing until it moves again. A stream stopped in the middle of a
+ * vibration may never send that frame, so a reader should also treat a long
+ * wait as stillness. Safe to call from any thread and at any time; the
+ * machine only starts gathering frames once something has asked for them.
+ */
+size_t inferno_haptics_read(InfernoHapticFrame* out, size_t max, uint32_t timeout_ms);
+
 #ifdef __cplusplus
 }
 #endif

@@ -35,6 +35,7 @@
 #include "hw/audio/aop-audio.h"
 #include "hw/audio/cs35l27.h"
 #include "hw/audio/cs42l77.h"
+#include "hw/audio/haptics.h"
 #include "hw/audio/mca.h"
 #include "hw/block/ans.h"
 #include "hw/char/apple_uart.h"
@@ -2208,11 +2209,16 @@ static void t8030_create_aop(AppleT8030MachineState* t8030)
  * does not come back, the server misses its RPCs, and the watchdog kills it, which takes down every
  * sound in the system rather than the one device.
  *
- * So the rest of the ports get drained here at roughly the rate a real one would consume them. The
- * samples have nowhere to go; nothing in this machine is listening on those wires anyway.
+ * So the rest of the ports get drained here at the rate a real one would consume them. Their samples
+ * have nowhere to go, with one exception: the actuator's become the host's vibration, see
+ * hw/audio/haptics.c.
  */
 #define AUDIO_DRAIN_INTERVAL_NS (5 * SCALE_MS)
-#define AUDIO_DRAIN_BYTES       (48000 * 2 * 2 / 200)
+// 48 kHz of 16-bit stereo, which is also 48 kHz of the actuator's 32-bit mono.
+#define AUDIO_DRAIN_BYTE_RATE   (48000 * 2 * 2)
+#define AUDIO_DRAIN_BYTES       (AUDIO_DRAIN_BYTE_RATE / 200)
+#define AUDIO_DRAIN_CATCHUP     (4)
+#define AUDIO_DRAIN_MAX_DEBT_NS (20 * SCALE_MS)
 #define AUDIO_DRAIN_MAX_PORTS   (16)
 
 // The MCA reads these two itself; see t8030_create_mca().
@@ -2233,19 +2239,41 @@ typedef struct
     size_t               count;
     uint64_t             ticks;
     QEMUTimer*           timer;
+    // Virtual time the ports have been drained up to.
+    int64_t              last_ns;
+    // The port the taptic engine's samples arrive on; AUDIO_DRAIN_MAX_PORTS when the tree describes none.
+    size_t               actuator;
 } T8030AudioDrain;
 
 static void t8030_audio_drain(void* opaque)
 {
     T8030AudioDrain* drain = opaque;
-    uint8_t          buffer[AUDIO_DRAIN_BYTES];
+    uint8_t          buffer[AUDIO_DRAIN_BYTES * AUDIO_DRAIN_CATCHUP];
+    int64_t          now   = qemu_clock_get_ns(QEMU_CLOCK_VIRTUAL);
+    uint64_t         due;
     size_t           i;
 
-    for (i = 0; i < drain->count; i++) {
+    /*
+     * As much as the time since the last pass is worth, not a fixed amount a pass: when the main loop is
+     * late — a busy host, vCPUs holding the big lock — a fixed amount plays every port slower than it
+     * runs, and the actuator's vibrations come out stretched. A debt too large to be worth catching up
+     * is written off instead.
+     */
+    if (now - drain->last_ns > AUDIO_DRAIN_MAX_DEBT_NS) { drain->last_ns = now - AUDIO_DRAIN_INTERVAL_NS; }
+    due = muldiv64(now - drain->last_ns, AUDIO_DRAIN_BYTE_RATE, NANOSECONDS_PER_SECOND) & ~(uint64_t)3;
+    due = MIN(due, sizeof(buffer));
+    drain->last_ns += muldiv64(due, NANOSECONDS_PER_SECOND, AUDIO_DRAIN_BYTE_RATE);
+
+    for (i = 0; due != 0 && i < drain->count; i++) {
         // A playback channel has its samples taken away; a capture channel is the other way round and
         // waits to be filled, so it gets silence. Either way the transfer finishes.
-        if (drain->tx[i] != NULL) { apple_sio_dma_read(drain->tx[i], buffer, sizeof(buffer)); }
-        if (drain->rx[i] != NULL) { apple_sio_dma_blit(drain->rx[i], 0, sizeof(buffer)); }
+        if (drain->tx[i] != NULL) {
+            uint64_t got = apple_sio_dma_read(drain->tx[i], buffer, due);
+
+            // Except the actuator's: those go on to the host's haptics.
+            if (i == drain->actuator) { apple_haptics_feed(buffer, got); }
+        }
+        if (drain->rx[i] != NULL) { apple_sio_dma_blit(drain->rx[i], 0, due); }
     }
 
     // A transfer that stays queued is one nothing on this side is servicing, and the guest thread
@@ -2282,12 +2310,16 @@ static void t8030_create_audio_drain(AppleT8030MachineState* t8030)
     skip_rx = apple_sio_get_endpoint(sio, AUDIO_DRAIN_SKIP_RX);
     drain   = g_new0(T8030AudioDrain, 1);
 
+    drain->actuator = AUDIO_DRAIN_MAX_PORTS;
+
     for (i = 0; i < ARRAY_SIZE(AUDIO_I2S_NODES) && drain->count < AUDIO_DRAIN_MAX_PORTS; i++) {
+        static const char    ACTUATOR[] = "audio-data,aop-audio-haptic";
         AppleDTNode*         node;
         AppleDTProp*         prop;
         AppleSIODMAEndpoint* tx;
         AppleSIODMAEndpoint* rx;
         uint8_t              channel;
+        GList*               child;
 
         node = apple_dt_get_node(t8030->device_tree, AUDIO_I2S_NODES[i]);
         if (node == NULL) { continue; }
@@ -2304,6 +2336,18 @@ static void t8030_create_audio_drain(AppleT8030MachineState* t8030)
         if (tx == skip_tx || tx == skip_rx) { tx = NULL; }
         if (rx == skip_tx || rx == skip_rx) { rx = NULL; }
         if (tx == NULL && rx == NULL) { continue; }
+
+        // The port whose audio-data node is the actuator's carries the guest's vibration; its samples go
+        // on to hw/audio/haptics.c rather than nowhere.
+        for (child = node->children; child != NULL; child = child->next) {
+            AppleDTProp* compatible = apple_dt_get_prop(child->data, "compatible");
+
+            if (compatible != NULL && compatible->len >= sizeof(ACTUATOR)
+                && memcmp(compatible->data, ACTUATOR, sizeof(ACTUATOR)) == 0)
+            {
+                drain->actuator = drain->count;
+            }
+        }
 
         drain->tx[drain->count] = tx;
         drain->rx[drain->count] = rx;
